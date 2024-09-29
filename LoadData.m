@@ -3,16 +3,16 @@
 % K.A. Severson, P.M. Attia et al. Data Driven Prediction of Battery    %
 % Cycle Life Before Capacity Degradation (2019) Nature Energy           %
 % This code assumes the data is in a subdirectory named 'Data'          %
-% The structs include information on the 
+% The structs include information on the https://data.matr.io/1/
 %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
 clear; close all; clc
 
-load('.\Data\2017-05-12_batchdata_updated_struct_errorcorrect')
+load('./Data/2017-05-12_batchdata_updated_struct_errorcorrect.mat')
 
 batch1 = batch; 
 numBat1 = size(batch1,2);
 
-load('.\Data\2017-06-30_batchdata_updated_struct_errorcorrect')
+load('./Data/2017-06-30_batchdata_updated_struct_errorcorrect.mat')
 
 %Some batteries continued from the first run into the second. We append 
 %those to the first batch before continuing.
@@ -45,7 +45,7 @@ batch2 = batch;
 numBat2 = size(batch2,2);
 clearvars batch
 
-load('.\Data\2018-04-12_batchdata_updated_struct_errorcorrect')
+load('./Data/2018-04-12_batchdata_updated_struct_errorcorrect.mat')
 batch3 = batch;
 batch3(38) = []; %remove channel 46 upfront; there was a problem with 
 %the data collection for this channel
@@ -103,4 +103,6 @@ train_ind = 1:(numBat1+numBat2);
 train_ind(test_ind) = [];
 secondary_test_ind = numBat-numBat3+1:numBat;
 
-
+testData = batch_combined(test_ind);
+trainData = batch_combined(train_ind);
+valData = batch_combined(secondary_test_ind);                                           
