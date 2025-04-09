@@ -3,7 +3,11 @@ Data/
 
 #ignore Matlab files
 *.asv
+*.mat
 
 #ignore jupyter notebook files
 .ipynb_checkpoints/
 __pycache__/
+
+#ignore macOS files
+.DS_Store
