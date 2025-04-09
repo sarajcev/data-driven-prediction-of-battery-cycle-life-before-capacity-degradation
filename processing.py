@@ -19,7 +19,7 @@ def import_dataset(filename):
     """
     import h5py
 
-    f = h5py.File(filename)
+    f = h5py.File(filename, mode='r')
     batch = f['batch']
     num_cells = batch['summary'].shape[0]
 
@@ -66,6 +66,102 @@ def import_dataset(filename):
     return bat_dict
 
 
+def filter_signal(data, window_length=20, order=3):
+    """
+    Remove extreme outliers and then filter the signal.
+
+    First, remove the extreme outliers that are more than
+    two standard deviations from the rolling median and then
+    smooth the signal by applying the Savitzky-Golay filter.
+
+    Parameters
+    ----------
+    data: array-like
+        Array (1D) holding the raw signal data points.
+    window_length: int, default=20
+        Window length in sample points for the moving windows,
+        and for the Savitzky-Golay filter.
+    order: int, default=3
+        Polynomial order for the Savitzky-Golay filter.
+    
+    Returns
+    -------
+    yhat: array
+        Array holding the filtered signal data points. It
+        has the same dimension as the original 1D array.
+    """
+    import pandas as pd
+    from scipy.signal import savgol_filter
+
+    s = pd.Series(data, copy=True)
+    # Rolling median.
+    ma = s.rolling(window=window_length, closed='left').median().values
+    # Rolling standard deviation.
+    sd = s.rolling(window=window_length, closed='left').std().values
+    # Detect outliers that are more than two standard
+    # deviations from the rolling median.
+    lw = ma - 2*sd
+    hi = ma + 2*sd
+    
+    N = len(data)
+    y = np.empty(N)
+    for i in range(N):
+        if i < window_length:
+            # First window.
+            y[i] = s.values[i]
+        else:
+            if lw[i] < s.values[i] < hi[i]:
+                y[i] = s.values[i]
+            else:
+                # Replace an outlier with the associated median value.
+                y[i] = ma[i]
+
+    # Smooth data with the Savitzky-Golay filter.
+    yhat = savgol_filter(y, window_length, order)
+
+    return yhat
+
+
+def interpolate_signal(x, y, low, high):
+    """
+    Linear interpolation of the signal.
+
+    Linear interpolation of the discharge curve for the
+    select number of points between starting (`low`) and 
+    ending (`high`) cycle numbers.
+
+    Parameters
+    ----------
+    x: array-like
+        Array holding x-coordinate points for the signal.
+    y: array-like
+        Array holding y-coordinate points for the signal.
+    low: int
+        Index of the starting point for the approximation.
+        This is the first cycle number of the discharge curve
+        that will be used for the interpolation.
+    high: int
+        Index of the ending point for the interpolation.
+        This is the last cycle number of the discharge curve
+        that will be used for the interpolation.
+    
+    Returns
+    -------
+    a0, ai: floats
+        Intercept (a0) and slope (ai) of the linear fit 
+        through the signal data (between starting and ending 
+        points as defined with `low` and `high` parameters).
+    """
+    from sklearn import linear_model
+
+    lm = linear_model.LinearRegression()
+    lm.fit(x[low:high].reshape(-1,1), y[low:high])
+    a0 = lm.intercept_  # intercept
+    ai = lm.coef_       # slope
+
+    return a0, ai
+
+
 def get_cell_stats(data, cell_id, cycles, var, full=True):
     """
     Compute statistics for a cell's measurement data. 
@@ -96,10 +192,10 @@ def get_cell_stats(data, cell_id, cycles, var, full=True):
     
     Returns
     -------
-    stats: dict
+    stats_dict: dict
         Dictionary holding various statistics for the measurement 
         data for a single parameter, for the individual cell and 
-        the select number of cycles (starting from the first cycle).
+        the select number of cycles (starting from the second cycle).
     """
     from scipy.stats import mode, skew, kurtosis
     from sklearn.metrics import auc  # area under a curve
@@ -107,7 +203,7 @@ def get_cell_stats(data, cell_id, cycles, var, full=True):
     
     stats_dict = defaultdict(list)
     support = data[cell_id]['Vdlin']
-    for cycle_i in range(1, cycles+1):
+    for cycle_i in range(2, cycles+1):
         # Retrieve data for each cycle.
         arr = data[cell_id]['cycles'][str(cycle_i)][var]
         # Compute summary statistics for each cycle.
@@ -228,228 +324,6 @@ def process_multiple_deltas(data, cell_id, var, start, stop, step=1):
     return np.asarray(modes), np.asarray(aucs)
 
 
-def filter_signal(data, window_length=20, order=3):
-    """
-    Remove extreme outliers and then filter the signal.
-
-    First, remove the extreme outliers that are more than
-    two standard deviations from the rolling median and then
-    smooth the signal by applying the Savitzky-Golay filter.
-
-    Parameters
-    ----------
-    data: array-like
-        Array (1D) holding the raw signal data points.
-    window_length: int, default=20
-        Window length in sample points for the moving windows,
-        and for the Savitzky-Golay filter.
-    order: int, default=3
-        Polynomial order for the Savitzky-Golay filter.
-    
-    Returns
-    -------
-    yhat: array
-        Array holding the filtered signal data points. It
-        has the same dimension as the original 1D array.
-    """
-    import pandas as pd
-    from scipy.signal import savgol_filter
-
-    s = pd.Series(data, copy=True)
-    # Rolling median.
-    ma = s.rolling(window=window_length, closed='left').median().values
-    # Rolling standard deviation.
-    sd = s.rolling(window=window_length, closed='left').std().values
-    # Detect outliers that are more than two standard
-    # deviations from the rolling median.
-    lw = ma - 2*sd
-    hi = ma + 2*sd
-    
-    N = len(data)
-    y = np.empty(N)
-    for i in range(N):
-        if i < window_length:
-            # First window.
-            y[i] = s.values[i]
-        else:
-            if lw[i] < s.values[i] < hi[i]:
-                y[i] = s.values[i]
-            else:
-                # Replace an outlier with the associated median value.
-                y[i] = ma[i]
-
-    # Smooth data with the Savitzky-Golay filter.
-    yhat = savgol_filter(y, window_length, order)
-
-    return yhat
-
-
-def interpolate_signal(x, y, low, high):
-    """
-    Linear interpolation of the signal.
-
-    Linear interpolation of the discharge curve for the
-    select number of points between starting (`low`) and 
-    ending (`high`) cycle numbers.
-
-    Parameters
-    ----------
-    x: array-like
-        Array holding x-coordinate points for the signal.
-    y: array-like
-        Array holding y-coordinate points for the signal.
-    low: int
-        Index of the starting point for the approximation.
-        This is the first cycle number of the discharge curve
-        that will be used for the interpolation.
-    high: int
-        Index of the ending point for the interpolation.
-        This is the last cycle number of the discharge curve
-        that will be used for the interpolation.
-    
-    Returns
-    -------
-    a0, ai: floats
-        Intercept (a0) and slope (ai) of the linear fit 
-        through the signal data (between starting and ending 
-        points as defined with `low` and `high` parameters).
-    """
-    from sklearn import linear_model
-
-    lm = linear_model.LinearRegression()
-    lm.fit(x[low:high].reshape(-1,1), y[low:high])
-    a0 = lm.intercept_  # intercept
-    ai = lm.coef_       # slope
-
-    return a0, ai
-
-
-def get_features_from_data(data_dict, skip_outliers=False):
-    """
-    Extract features from battery cell data.
-
-    Engineer features from cycles and summary measurement
-    data for each cell. This includes statistical features
-    and discharge fade curve features.
-
-    Parameters
-    ----------
-    data_dict: dict
-        Dictionary holding battery cell measurements data.
-        This dictionary is formed by importing data.
-    skip_outlier: bool, default=False
-        Indicator for skipping outlier battery cells.
-
-    Returns
-    -------
-    X_data: dict
-        Dictionary holding features for each battery cell.
-    y_data: array
-        Array holding end-of-life value for each battery
-        cell. This is the target of the regression.
-    """
-    from collections import defaultdict
-    from scipy.integrate import simpson
-    
-    X_data = defaultdict(list)
-    y_data_eol = []
-    for cell in data_dict.keys():
-        cycles = data_dict[cell]['summary']['cycle']
-        fade_curve = data_dict[cell]['summary']['QD']
-        # End-of-Life cell cycle.
-        cycle_life = data_dict[cell]['cycle_life'][0][0]
-        if skip_outliers and np.isnan(cycle_life):
-            continue
-        if np.isnan(cycle_life):
-            # Extract the EoL value.
-            curve = fade_curve / fade_curve[0]
-            # EoL is at the 80% of initial charge capacity.
-            idx = np.argwhere(curve < 0.8)[0]
-            eol = int(cycles[idx][0])
-        else:
-            eol = int(cycle_life)
-        
-        # Target
-        y_data_eol.append(eol)
-        
-        # Features
-        voltage = data_dict[cell]['Vdlin']
-        # Qd cycles curves.
-        Qd10 = data_dict[cell]['cycles'][str(10)]['Qdlin']
-        Qd100 = data_dict[cell]['cycles'][str(100)]['Qdlin']
-        # Qd(100) - Qd(10) cycles
-        deltaQ = Qd100 - Qd10
-        # Statistical features from dQ(100-10) curve.
-        dQstats = get_data_array_stats(deltaQ)
-        for key, value in dQstats.items():
-            X_data[key].append(value)
-        
-        # Discharge capacity fade curve features.
-        fade_curve_smooth = filter_signal(fade_curve)
-        # Discharge capacity cycle 2.
-        X_data['qd2'].append(fade_curve_smooth[2])
-        # Difference between max discharge capacity and cycle 2.
-        X_data['qd_dif'].append(fade_curve_smooth.max() - fade_curve_smooth[2])
-        # Discharge capacity cycle 100.
-        X_data['qd100'].append(fade_curve_smooth[99])
-
-        # Linear fit to the discharge fade curve between cycles 2 and 100.
-        intercept, slope = interpolate_signal(cycles, fade_curve_smooth, 2, 100)
-        X_data['slope'].append(slope[0])
-        X_data['inter'].append(intercept)
-        # Linear fit to the discharge fade curve between cycles 90 and 100.
-        interc, slope = interpolate_signal(cycles, fade_curve_smooth, 90, 100)
-        X_data['slp9'].append(slope[0])
-        X_data['inc9'].append(interc)
-        
-        # Other features.
-        # Average charge time for the first five cycles.
-        charge_time = data_dict[cell]['summary']['chargetime']
-        X_data['char5'].append(charge_time[:5].mean())
-        
-        # Minimum and maximum temperature from cycles 2 to 100.
-        tc_min = []
-        tc_max = []
-        for cyc in range(1, 100):
-            tc_min.append(data_dict[cell]['cycles'][str(cyc)]['Tdlin'].min())
-            tc_max.append(data_dict[cell]['cycles'][str(cyc)]['Tdlin'].max())
-        # Extract min and max values.
-        X_data['tmin'].append(min(tc_min))
-        X_data['tmax'].append(max(tc_max))
-
-        # Minimum internal resistance from cycles 2 to 100.
-        resistance = data_dict[cell]['summary']['IR']
-        X_data['rsmin'].append(resistance[1:100].min())
-        # Internal resistance difference between cycles 2 and 100.
-        X_data['rsdif'].append(resistance[99] - resistance[1])
-
-        # Additional features.
-        # Area under the Qd100 - Qd10 discharge curve.
-        X_data['dq_auc'].append(simpson(deltaQ, x=voltage))
-        
-        # dQdV cycles curves.
-        dQdV10 = np.diff(Qd10, prepend=0)  # first difference
-        dQdV100 = np.diff(Qd100, prepend=0)
-        # dQdV(100) - dQdV(10) cycles
-        delta_dQdV = dQdV100 - dQdV10
-        # Statistical features from dQdV(100-10) curve.
-        dQdVstats = get_data_array_stats(delta_dQdV)
-        for key, value in dQdVstats.items():
-            X_data['dqdv_'+key].append(value)
-        
-        # Area under the dQdV(100) - dQdV(10) curve.
-        X_data['dqdv_auc'].append(simpson(delta_dQdV, x=voltage))
-
-        # Average temperature from the first five cycles.
-        temperature = data_dict[cell]['summary']['Tavg']
-        X_data['tav5'].append(temperature[:5].mean())
-    
-    # Turn targets into the Numpy array.
-    y_data = np.asarray(y_data_eol)
-
-    return X_data, y_data
-
-
 def bacon_watts_model(x, alpha0, alpha1, alpha2, x1, gamma=1e-8):
     # Bacon-Watts model for the knee-point identification.
     y = alpha0 + alpha1*(x - x1) + alpha2*(x - x1)*np.tanh((x - x1)/gamma)
@@ -487,94 +361,288 @@ def fit_bacon_watts_model(x, y, p0, model_type='double'):
     return popt, confint
 
 
-def get_knee_points(data_dict, skip_outliers=False):
+def get_features_targets_from_data(data_dict, end=100, 
+                                   targets='eol', skip_outliers=True):
     """
-    Get the knee-points for the battery cells.
+    Extract features and targets from battery cell data.
 
-    Extract the knee-point values for each battery cell,
-    from the Bacon-Watts model of the discharge fade curve.
+    Engineer features from cycles and summary measurement
+    data for each cell. This includes statistical features
+    and discharge fade curve features. Extract also the 
+    associated targets for the regression analysis.
 
     Parameters
     ----------
     data_dict: dict
         Dictionary holding battery cell measurements data.
         This dictionary is formed by importing data.
-    skip_outlier: bool, default=False
-        Indicator for skipping outlier battery cells.
-    
+    end: int, default=100
+        Cycle number which marks the end of the observation
+        range. All features must be derived from the data up
+        to this cycle number.
+    targets: str, default='eol'
+        Parameter that defines a type of targets that will be 
+        returned from the battery cell data. Following three 
+        values are allowed:
+            'eol': End-of-Life values,
+            'knee': Knee point values (from the Bacon-Watts fit),
+            'knee-onset': Knee-onset values (from the Bacon-Watts fit).
+    skip_outlier: bool, default=True
+        Indicator for skipping outlier battery cells (i.e. those that
+        have 'nan' values for `cycle_life` data dictionary keys).
+
     Returns
     -------
+    X_data: dict
+        Dictionary holding features for each battery cell.
     y_data: array
-        Array holding the knee-point value for each battery
-        cell. This is the target of the regression.
+        Array holding targets for each battery cell. 
+        These depend on the value of the `targets` parameter.
+    
+    Notes
+    -----
+    This function features several hard-coded values, which are 
+    considered defaults, that have been set based on previous 
+    research. For example, 2nd cycle is a referent starting cycle 
+    for many features. These defaults should be reviewed and 
+    adjusted as necessary.
+    
+    Important
+    ---------
+    This function removes (skips) cell records with estimated EoL
+    values below 100 cycles, as well as those cells with knee and
+    knee-onset point values that were estimated to be below 100 
+    cycles. These cells are considered defective.
     """
+    from collections import defaultdict
+    from scipy.integrate import simpson
+    
+    X_data = defaultdict(list)
+    y_data_eol = []
     y_data_knee = []
-    for cell in data_dict.keys():
-        cycle_life = data_dict[cell]['cycle_life'][0][0]
-        if skip_outliers and np.isnan(cycle_life):
-            # Skip this record entirely.
-            continue
+    y_data_knee_onset = []
+    selected_stats = ['min', 'mean', 'mode', 'std', 'skew', 'iqr']
 
-        # Discharge fade curve.
+    for cell in data_dict.keys():
         cycles = data_dict[cell]['summary']['cycle']
         fade_curve = data_dict[cell]['summary']['QD']
+        # Smooth the fade discharge curve.
         fade_curve_smooth = filter_signal(fade_curve)
-        # Initial values for the fit.
-        p0 = [1, -1e-4, -1e-4, 0.7*len(cycles)]
-        # Fit a single Bacon-Watts model.
-        popt, _ = fit_bacon_watts_model(cycles, fade_curve_smooth, p0,
-                                        model_type='single')
-        knee_point = int(popt[3])
-        y_data_knee.append(knee_point)
-
-    # Turn targets into the Numpy array.
-    y_data = np.asarray(y_data_knee)
-
-    return y_data
-
-
-def get_knee_onset_points(data_dict, skip_outliers=False):
-    """
-    Get the knee-onset points for the battery cells.
-
-    Extract the knee-onset point values for each battery cell,
-    from the double Bacon-Watts model of the discharge fade curve.
-
-    Parameters
-    ----------
-    data_dict: dict
-        Dictionary holding battery cell measurements data.
-        This dictionary is formed by importing data.
-    skip_outlier: bool, default=False
-        Indicator for skipping outlier battery cells.
-    
-    Returns
-    -------
-    y_data: array
-        Array holding the knee-onset point value for each battery
-        cell. This is the target of the regression.
-    """
-    y_data_knee_onset = []
-    for cell in data_dict.keys():
+        # End-of-Life cell cycle.
         cycle_life = data_dict[cell]['cycle_life'][0][0]
+
         if skip_outliers and np.isnan(cycle_life):
-            # Skip this record entirely.
+            # Skip cell records that have `nan` values
+            # for `cycle_life` data dictionary keys.
+            print(f'Skipping cell ID: {cell}.')
             continue
         
-        # Discharge fade curve.
-        cycles = data_dict[cell]['summary']['cycle']
-        cycles = data_dict[cell]['summary']['cycle']
-        fade_curve = data_dict[cell]['summary']['QD']
-        fade_curve_smooth = filter_signal(fade_curve)
-        # Initial values for the fit.
-        p0 = [1, -1e-4, -1e-4, -1e-4, 0.6*len(cycles), 1.1*len(cycles)]
-        # Fit a double Bacon-Watts model.
-        popt, _ = fit_bacon_watts_model(cycles, fade_curve_smooth, p0,
-                                        model_type='double')
-        knee_onset_point = min(int(popt[4]), int(popt[5]))
-        y_data_knee_onset.append(knee_onset_point)
+        if np.isnan(cycle_life):
+            # Extract the EoL value.
+            curve = fade_curve / fade_curve[0]
+            # EoL is at the 80% of initial charge capacity.
+            idx = np.argwhere(curve < 0.8)
+            if idx.size == 0:
+                # Capacity curve did not drop below the 80% margin.
+                # Using the last point on the discharge curve as a
+                # substitute for the EoL point.
+                eol = int(cycles[-1])
+            else:
+                eol = int(cycles[idx][0])
+        else:
+            eol = int(cycle_life)
+        
+        if eol <= 101:
+            # Skip cell records that have estimated EoL values
+            # below 100 cycles (these are considered defective).
+            print(f'Skipping cell ID: {cell} with EoL: {eol}.')
+            continue
+        if eol < end:
+            # EoL is below the observation range.
+            raise ValueError(f'Cell ID: {cell} EoL is below the `end` cycle.')
+        
+        # Targets.
+        # Targets are End-of-Life values (default).
+        y_data_eol.append(eol)
 
-    # Turn targets into the Numpy array.
-    y_data = np.asarray(y_data_knee_onset)
+        # Targets are knee points or knee-onset points.
+        if targets == 'knee' or targets == 'knee-onset':
+            # Initial values for the fit.
+            p0 = [1, -1e-4, -1e-4, 0.7*len(cycles)]
+            # Fit a single Bacon-Watts model.
+            popt, _ = fit_bacon_watts_model(cycles, fade_curve_smooth, p0,
+                                            model_type='single')
+            knee_point = int(popt[3])
+            # Check the validity of the estimated knee point.
+            if targets == 'knee':
+                if knee_point < 0:
+                    print(f'Cell ID: {cell}, Knee: {knee_point}')
+                    raise ValueError(f'Error: {cell} knee point is negative!')
+                if knee_point > eol:
+                    print(f'Cell ID: {cell}, Knee: {knee_point}, EoL: {eol}')
+                    print(f'Warning: {cell} knee-point is beyond the EoL!')
+                if knee_point <= 101:
+                    # Skip cell records that have estimated knee values
+                    # below 100 cycles (these are considered defective).
+                    print(f'Skipping cell ID: {cell} with Knee: {knee_point}.')
+                    continue
+            # Append knee point value.
+            y_data_knee.append(knee_point)
 
-    return y_data
+            # Targets are knee-onset points.
+            # Initial values for the fit.
+            p0 = [popt[0], popt[1] + popt[2]/2, popt[2], popt[2]/2, 
+                  0.8*popt[3], 1.1*popt[3]]
+            # Fit a double Bacon-Watts model.
+            popt_onset, _ = fit_bacon_watts_model(cycles, fade_curve_smooth, p0, 
+                                                  model_type='double')
+            knee_onset_point = min(int(popt_onset[4]), int(popt_onset[5]))
+            # Check the validity of the estimated knee-onset point.
+            if targets == 'knee-onset':
+                if popt_onset[4] > popt_onset[5]:
+                    print('Warning: Issues with a Bacon-Watts fit detected.')
+                if knee_onset_point < 0:
+                    print(f'Cell ID: {cell}, Knee-onset: {knee_onset_point}')
+                    raise ValueError(f'Error: {cell} knee-onset point is negative!')
+                if knee_onset_point > eol:
+                    print(f'Cell ID: {cell}, Knee-onset: {knee_onset_point}, \
+                          EoL: {eol}')
+                    print(f'Warning: {cell} knee-onset point is beyond the EoL!')
+                if knee_onset_point > knee_point:
+                    print(f'Cell ID: {cell}, Knee: {knee_point}, \
+                          Knee-onset: {knee_onset_point}')
+                    print(f'Warning: {cell} knee-onset point is beyond the Knee point!')
+                if knee_onset_point <= 101:
+                    # Skip cell records that have estimated knee-onset values
+                    # below 100 cycles (these are considered defective).
+                    print(f'Skipping cell ID: {cell} with Knee-onset: {knee_onset_point}.')
+                    continue
+            # Append knee-onset point value.
+            y_data_knee_onset.append(knee_onset_point)
+                
+        # Features.
+        voltage = data_dict[cell]['Vdlin']
+        # Qd cycles curves.
+        Qd10 = data_dict[cell]['cycles'][str(10)]['Qdlin']  # hard-coded
+        Qd100 = data_dict[cell]['cycles'][str(end)]['Qdlin']
+        # Qd(100) - Qd(10) cycles
+        deltaQ = Qd100 - Qd10
+        
+        # Statistical features from dQ(100-10) curve.
+        dQstats = get_data_array_stats(deltaQ)
+        for key, value in dQstats.items():
+            # Return all calculated statistical properties.
+            X_data[key].append(value)
+        
+        # Discharge capacity fade curve features.
+        # Discharge capacity at cycle 2.
+        Qd2 = fade_curve_smooth[1]
+        if Qd2 > 1.15 or Qd2 < 0.8:
+            raise ValueError('Discharge capacity at cycle 2 is out of bounds.')
+        X_data['qd2'].append(Qd2)
+        # Difference between max discharge capacity and cycle 2.
+        X_data['qd_dif'].append(fade_curve_smooth.max() - Qd2)
+        # Discharge capacity at cycle 100.
+        X_data['qd100'].append(fade_curve_smooth[end-1])
+
+        # Linear fit to the discharge fade curve between cycles 2 and 100.
+        intercept, slope = interpolate_signal(cycles, fade_curve_smooth, 2, end)
+        X_data['slope'].append(slope[0])
+        X_data['inter'].append(intercept)
+        
+        # Linear fit to the discharge fade curve between cycles 90 and 100.
+        interc, slope = interpolate_signal(cycles, fade_curve_smooth, end-10, end)
+        X_data['slp9'].append(slope[0])
+        X_data['inc9'].append(interc)
+        
+        # Other features.
+        # Average charge time for the first five cycles.
+        charge_time = data_dict[cell]['summary']['chargetime']
+        X_data['char5'].append(charge_time[1:6].mean())
+        
+        # Minimum and maximum temperature from cycles 2 to 100.
+        # Using the "summary" Tmin and Tmax values.
+        t_min = data_dict[cell]['summary']['Tmin']
+        t_max = data_dict[cell]['summary']['Tmax']
+        X_data['tsmin'].append(t_min[1:end].min())
+        X_data['tsmax'].append(t_max[1:end].max())
+
+        # Integral of (average) temperature over time, cycles 2 to 100.
+        charge_time = data_dict[cell]['summary']['chargetime']
+        temperature = data_dict[cell]['summary']['Tavg']
+        t_integral = simpson(temperature[1:end], x=charge_time[1:end])
+        X_data['t_int'].append(t_integral)
+
+        # Minimum internal resistance from cycles 2 to 100.
+        resistance = data_dict[cell]['summary']['IR']
+        X_data['rsmin'].append(resistance[1:end].min())
+        # Internal resistance difference between cycles 2 and 100.
+        X_data['rsdif'].append(resistance[end-1] - resistance[1])
+
+        # Additional features.
+        # Area under the Qd100 - Qd10 discharge curve.
+        X_data['dq_auc'].append(simpson(deltaQ, x=voltage))
+        
+        # dQdV cycles curves.
+        dQdV10 = np.diff(Qd10, prepend=0)  # first difference
+        dQdV100 = np.diff(Qd100, prepend=0)
+        # dQdV(100) - dQdV(10) cycles
+        delta_dQdV = dQdV100 - dQdV10
+        
+        # Statistical features from dQdV(100-10) curve.
+        dQdVstats = get_data_array_stats(delta_dQdV)
+        for key, value in dQdVstats.items():
+            if key in selected_stats:
+                # Return only selected stats.
+                X_data['dqdv_'+key].append(value)
+        
+        # Area under the dQdV(100) - dQdV(10) curve.
+        X_data['dqdv_auc'].append(simpson(delta_dQdV, x=voltage))
+
+        # Temperature cycles curves.
+        Td10 = data_dict[cell]['cycles'][str(10)]['Tdlin']
+        Td100 = data_dict[cell]['cycles'][str(end)]['Tdlin']
+        # Td(100) - Td(10)
+        delta_Td = Td100 - Td10
+        
+        # Statistical features.
+        td_stats = get_data_array_stats(delta_Td)
+        for key, value in td_stats.items():
+            if key in selected_stats:
+                # Return only selected stats.
+                X_data['td_'+key].append(value)
+        
+        # Area under the Td(100) - Td(10) curve.
+        X_data['td_auc'].append(simpson(delta_Td, x=voltage))
+
+        # Average temperature from the first five cycles.
+        X_data['tav5'].append(temperature[:5].mean())
+        
+        # Max absolute difference between Tmin and Tmax cycles 2 to 100.
+        t_abs_dif = abs(t_max[1:end] - t_min[1:end])
+        X_data['tadif'].append(max(t_abs_dif))
+
+        # Additional features from individual cycles.
+        # Discharge curve features from cycles 2 to 50.
+        cell_stats_qd = get_cell_stats(data_dict, cell, 50, 'Qdlin')
+        # Min. AUC value from the first 50 cycles.
+        X_data['auc50q'].append(min(cell_stats_qd['auc']))
+        # dQ/dV curve features from cycles 2 to 50.
+        cell_stats_dqdv = get_cell_stats(data_dict, cell, 50, 'dQdV')
+        # Min. AUC value from the first 50 cycles.
+        X_data['auc50qv'].append(min(cell_stats_dqdv['auc']))
+    
+    # Turn a list of targets into the Numpy array.
+    if targets == 'eol':
+        # End-of-Life points.
+        y_data = np.asarray(y_data_eol)
+    elif targets == 'knee':
+        # Knee points.
+        y_data = np.asarray(y_data_knee)
+    elif targets == 'knee-onset':
+        # Knee-onset points.
+        y_data = np.asarray(y_data_knee_onset)
+    else:
+        raise NotImplementedError(f'{targets}: Unknown target!')
+
+    return X_data, y_data
