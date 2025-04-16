@@ -15,7 +15,7 @@ def import_dataset(filename):
     Returns
     -------
     bat_dict: dict
-        Python dictionary holding the data.
+        Nested dictionary holding the data.
     """
     import h5py
 
@@ -157,7 +157,7 @@ def interpolate_signal(x, y, low, high):
     lm = linear_model.LinearRegression()
     lm.fit(x[low:high].reshape(-1,1), y[low:high])
     a0 = lm.intercept_  # intercept
-    ai = lm.coef_       # slope
+    ai = lm.coef_       # slope (list)
 
     return a0, ai
 
@@ -362,7 +362,8 @@ def fit_bacon_watts_model(x, y, p0, model_type='double'):
 
 
 def get_features_targets_from_data(data_dict, end=100, 
-                                   targets='eol', skip_outliers=True):
+                                   targets='eol', 
+                                   skip_outliers=True):
     """
     Extract features and targets from battery cell data.
 
@@ -377,19 +378,22 @@ def get_features_targets_from_data(data_dict, end=100,
         Dictionary holding battery cell measurements data.
         This dictionary is formed by importing data.
     end: int, default=100
-        Cycle number which marks the end of the observation
-        range. All features must be derived from the data up
-        to this cycle number.
+        Cycle index which marks the end of the observation
+        period. All features must be derived from the data
+        up to (and including) this cycle number.
     targets: str, default='eol'
-        Parameter that defines a type of targets that will be 
-        returned from the battery cell data. Following three 
-        values are allowed:
+        Parameter which defines a type of targets that will
+        be returned from the battery cell data. Following
+        three values are allowed:
             'eol': End-of-Life values,
-            'knee': Knee point values (from the Bacon-Watts fit),
-            'knee-onset': Knee-onset values (from the Bacon-Watts fit).
+            'knee': Knee point values (from the single
+                Bacon-Watts model fit),
+            'knee-onset': Knee-onset values (from the double
+                Bacon-Watts model fit).
     skip_outlier: bool, default=True
-        Indicator for skipping outlier battery cells (i.e. those that
-        have 'nan' values for `cycle_life` data dictionary keys).
+        Indicator for skipping outlier battery cells (i.e. 
+        those that have 'nan' values for `cycle_life` data
+        dictionary keys).
 
     Returns
     -------
@@ -401,27 +405,52 @@ def get_features_targets_from_data(data_dict, end=100,
     
     Notes
     -----
-    This function features several hard-coded values, which are 
-    considered defaults, that have been set based on previous 
-    research. For example, 2nd cycle is a referent starting cycle 
-    for many features. These defaults should be reviewed and 
-    adjusted as necessary.
+    This function features several hard-coded values, which
+    are considered defaults, that have been set based on 
+    previous research. For example, 2nd cycle is a referent
+    starting cycle for many features. These defaults should
+    be reviewed and adjusted as necessary.
     
     Important
     ---------
-    This function removes (skips) cell records with estimated EoL
-    values below 100 cycles, as well as those cells with knee and
-    knee-onset point values that were estimated to be below 100 
-    cycles. These cells are considered defective.
+    This function removes (skips) cell records with estimated
+    EoL values below 100 cycles, as well as those cells with
+    knee and knee-onset point values that were estimated to be
+    below 100 cycles. These cells are considered defective.
+
+    References
+    ----------
+    Kristen A. Severson et al., Data-driven prediction of
+    battery cycle life before capacity degradation, Nature
+    Energy, Vol. 4, 2019, 383-391, 
+    https://doi.org/10.1038/s41560-019-0356-8.
+    
+    Kristen A. Severson et al., Supplementary Information
+    for Data-driven prediction of battery cycle life before 
+    capacity degradation, Nature Energy, Vol. 4, 2019.
+
+    P. Fermín-Cueto, et al., Identification and machine
+    learning prediction of knee-point and knee-onset in
+    capacity degradation curves of lithium-ion cells, Energy
+    and AI, Volume 1, 2020, 100006, 
+    https://doi.org/10.1016/j.egyai.2020.100006.
+    
+    P. Fermín et al., Supplementary Information for
+    Identification and machine learning prediction of 
+    knee-point and knee-onset in capacity degradation curves 
+    of lithium-ion cells, Energy and AI, Volume 1, 2020.
     """
     from collections import defaultdict
     from scipy.integrate import simpson
     
     X_data = defaultdict(list)
-    y_data_eol = []
-    y_data_knee = []
-    y_data_knee_onset = []
-    selected_stats = ['min', 'mean', 'mode', 'std', 'skew', 'iqr']
+    y_data_eol = []         # EoL points
+    y_data_knee = []        # Knee points
+    y_data_knee_onset = []  # Knee-onset points
+    # List statistical features of interest. It can be any
+    # of the following: 'min', 'max', 'mean', 'std', 'mode', 
+    # 'median', 'skew', 'kurt', 'iqr'.
+    selected_stats = ['min', 'mean', 'mode', 'std', 'skew', 'kurt', 'iqr']
 
     for cell in data_dict.keys():
         cycles = data_dict[cell]['summary']['cycle']
@@ -489,7 +518,6 @@ def get_features_targets_from_data(data_dict, end=100,
             # Append knee point value.
             y_data_knee.append(knee_point)
 
-            # Targets are knee-onset points.
             # Initial values for the fit.
             p0 = [popt[0], popt[1] + popt[2]/2, popt[2], popt[2]/2, 
                   0.8*popt[3], 1.1*popt[3]]
@@ -605,7 +633,7 @@ def get_features_targets_from_data(data_dict, end=100,
         # Td(100) - Td(10)
         delta_Td = Td100 - Td10
         
-        # Statistical features.
+        # Statistical features from Td(100-10) curve.
         td_stats = get_data_array_stats(delta_Td)
         for key, value in td_stats.items():
             if key in selected_stats:
