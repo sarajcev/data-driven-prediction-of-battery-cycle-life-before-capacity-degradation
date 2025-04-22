@@ -362,7 +362,6 @@ def fit_bacon_watts_model(x, y, p0, model_type='double'):
 
 
 def get_features_targets_from_data(data_dict, end=100, 
-                                   targets='eol', 
                                    skip_outliers=True):
     """
     Extract features and targets from battery cell data.
@@ -370,7 +369,8 @@ def get_features_targets_from_data(data_dict, end=100,
     Engineer features from cycles and summary measurement
     data for each cell. This includes statistical features
     and discharge fade curve features. Extract also the 
-    associated targets for the regression analysis.
+    associated targets for the regression or classification 
+    analysis.
 
     Parameters
     ----------
@@ -381,15 +381,6 @@ def get_features_targets_from_data(data_dict, end=100,
         Cycle index which marks the end of the observation
         period. All features must be derived from the data
         up to (and including) this cycle number.
-    targets: str, default='eol'
-        Parameter which defines a type of targets that will
-        be returned from the battery cell data. Following
-        three values are allowed:
-            'eol': End-of-Life values,
-            'knee': Knee point values (from the single
-                Bacon-Watts model fit),
-            'knee-onset': Knee-onset values (from the double
-                Bacon-Watts model fit).
     skip_outlier: bool, default=True
         Indicator for skipping outlier battery cells (i.e. 
         those that have 'nan' values for `cycle_life` data
@@ -399,9 +390,19 @@ def get_features_targets_from_data(data_dict, end=100,
     -------
     X_data: dict
         Dictionary holding features for each battery cell.
-    y_data: array
-        Array holding targets for each battery cell. 
-        These depend on the value of the `targets` parameter.
+    y_data: dict
+        Dictionary holding targets for each battery cell, 
+        with following four keys:
+            'eol': End-of-Life values,
+            'knee': Knee point values (from the single
+                Bacon-Watts model fit),
+            'knee-onset': Knee-onset values (from the double
+                Bacon-Watts model fit).
+            'class': classification labels (0 - long life cell,
+                1 - short life cell, where life threshold has
+                been set at 550 cycles).
+        First three target types are used for regression and 
+        the fourth target is used for classification.
     
     Notes
     -----
@@ -447,6 +448,7 @@ def get_features_targets_from_data(data_dict, end=100,
     y_data_eol = []         # EoL points
     y_data_knee = []        # Knee points
     y_data_knee_onset = []  # Knee-onset points
+    y_data_class = []       # classification labels
     # List statistical features of interest. It can be any
     # of the following: 'min', 'max', 'mean', 'std', 'mode', 
     # 'median', 'skew', 'kurt', 'iqr'.
@@ -494,61 +496,82 @@ def get_features_targets_from_data(data_dict, end=100,
         # Targets are End-of-Life values (default).
         y_data_eol.append(eol)
 
-        # Targets are knee points or knee-onset points.
-        if targets == 'knee' or targets == 'knee-onset':
-            # Initial values for the fit.
-            p0 = [1, -1e-4, -1e-4, 0.7*len(cycles)]
-            # Fit a single Bacon-Watts model.
-            popt, _ = fit_bacon_watts_model(cycles, fade_curve_smooth, p0,
-                                            model_type='single')
-            knee_point = int(popt[3])
-            # Check the validity of the estimated knee point.
-            if targets == 'knee':
-                if knee_point < 0:
-                    print(f'Cell ID: {cell}, Knee: {knee_point}')
-                    raise ValueError(f'Error: {cell} knee point is negative!')
-                if knee_point > eol:
-                    print(f'Cell ID: {cell}, Knee: {knee_point}, EoL: {eol}')
-                    print(f'Warning: {cell} knee-point is beyond the EoL!')
-                if knee_point <= 101:
-                    # Skip cell records that have estimated knee values
-                    # below 100 cycles (these are considered defective).
-                    print(f'Skipping cell ID: {cell} with Knee: {knee_point}.')
-                    continue
-            # Append knee point value.
-            y_data_knee.append(knee_point)
+        # Classification targets (class labels).
+        short_life_threshold = 550
+        if eol <= short_life_threshold:
+            # Short life cell.
+            klasa = 1
+        else:
+            # Long life cell.
+            klasa = 0
+        y_data_class.append(klasa)
 
-            # Initial values for the fit.
-            p0 = [popt[0], popt[1] + popt[2]/2, popt[2], popt[2]/2, 
-                  0.8*popt[3], 1.1*popt[3]]
-            # Fit a double Bacon-Watts model.
-            popt_onset, _ = fit_bacon_watts_model(cycles, fade_curve_smooth, p0, 
-                                                  model_type='double')
-            knee_onset_point = min(int(popt_onset[4]), int(popt_onset[5]))
-            # Check the validity of the estimated knee-onset point.
-            if targets == 'knee-onset':
-                if popt_onset[4] > popt_onset[5]:
-                    print('Warning: Issues with a Bacon-Watts fit detected.')
-                if knee_onset_point < 0:
-                    print(f'Cell ID: {cell}, Knee-onset: {knee_onset_point}')
-                    raise ValueError(f'Error: {cell} knee-onset point is negative!')
-                if knee_onset_point > eol:
-                    print(f'Cell ID: {cell}, Knee-onset: {knee_onset_point}, \
-                          EoL: {eol}')
-                    print(f'Warning: {cell} knee-onset point is beyond the EoL!')
-                if knee_onset_point > knee_point:
-                    print(f'Cell ID: {cell}, Knee: {knee_point}, \
-                          Knee-onset: {knee_onset_point}')
-                    print(f'Warning: {cell} knee-onset point is beyond the Knee point!')
-                if knee_onset_point <= 101:
-                    # Skip cell records that have estimated knee-onset values
-                    # below 100 cycles (these are considered defective).
-                    print(f'Skipping cell ID: {cell} with Knee-onset: {knee_onset_point}.')
-                    continue
-            # Append knee-onset point value.
-            y_data_knee_onset.append(knee_onset_point)
+        # Targets are knee points.
+        # Initial values for the fit.
+        p0 = [1, -1e-4, -1e-4, 0.7*len(cycles)]
+        # Fit a single Bacon-Watts model.
+        popt, _ = fit_bacon_watts_model(cycles, fade_curve_smooth, p0,
+                                        model_type='single')
+        knee_point = int(popt[3])
+        
+        # Check the validity of the estimated knee point.
+        if knee_point < 0:
+            print(f'Cell ID: {cell}, Knee: {knee_point}')
+            raise ValueError(f'Error: {cell} knee point is negative!')
+        if knee_point > eol:
+            print(f'Cell ID: {cell}, Knee: {knee_point}, EoL: {eol}')
+            print(f'Warning: {cell} knee-point is beyond the EoL!')
+        if knee_point <= 101:
+            # Skip cell records that have estimated knee values
+            # below 100 cycles (these are considered defective).
+            print(f'Skipping cell ID: {cell} with Knee: {knee_point}.')
+            continue
+        
+        # Append knee point value.
+        y_data_knee.append(knee_point)
+        
+        # Targets are knee-onset points.
+        # Initial values for the fit.
+        p0 = [popt[0], popt[1] + popt[2]/2, popt[2], popt[2]/2, 
+                0.8*popt[3], 1.1*popt[3]]
+        # Fit a double Bacon-Watts model.
+        popt_onset, _ = fit_bacon_watts_model(cycles, fade_curve_smooth, p0, 
+                                                model_type='double')
+        knee_onset_point = min(int(popt_onset[4]), int(popt_onset[5]))
+        
+        # Check the validity of the estimated knee-onset point.
+        if popt_onset[4] > popt_onset[5]:
+            print('Warning: Issues with a Bacon-Watts fit detected.')
+        if knee_onset_point < 0:
+            print(f'Cell ID: {cell}, Knee-onset: {knee_onset_point}')
+            raise ValueError(f'Error: {cell} knee-onset point is negative!')
+        if knee_onset_point > eol:
+            print(f'Cell ID: {cell}, Knee-onset: {knee_onset_point}, \
+                    EoL: {eol}')
+            print(f'Warning: {cell} knee-onset point is beyond the EoL!')
+        if knee_onset_point > knee_point:
+            print(f'Cell ID: {cell}, Knee: {knee_point}, \
+                    Knee-onset: {knee_onset_point}')
+            print(f'Warning: {cell} knee-onset point is beyond the Knee point!')
+        if knee_onset_point <= 101:
+            # Skip cell records that have estimated knee-onset values
+            # below 100 cycles (these are considered defective).
+            print(f'Skipping cell ID: {cell} with Knee-onset: {knee_onset_point}.')
+            continue
+        
+        # Append knee-onset point value.
+        y_data_knee_onset.append(knee_onset_point)
                 
-        # Features.
+        # Classification features.
+        Qd4 = data_dict[cell]['cycles'][str(4)]['Qdlin']  # hard-coded
+        Qd5 = data_dict[cell]['cycles'][str(5)]['Qdlin']  # hard-coded
+        deltaq = Qd5 - Qd4
+        dq_stats = get_data_array_stats(deltaq)
+        for key, value in dq_stats.items():
+            if key in ['min', 'std']:
+                X_data['class_'+key].append(value)
+
+        # Regression features.
         voltage = data_dict[cell]['Vdlin']
         # Qd cycles curves.
         Qd10 = data_dict[cell]['cycles'][str(10)]['Qdlin']  # hard-coded
@@ -660,17 +683,15 @@ def get_features_targets_from_data(data_dict, end=100,
         # Min. AUC value from the first 50 cycles.
         X_data['auc50qv'].append(min(cell_stats_dqdv['auc']))
     
-    # Turn a list of targets into the Numpy array.
-    if targets == 'eol':
-        # End-of-Life points.
-        y_data = np.asarray(y_data_eol)
-    elif targets == 'knee':
-        # Knee points.
-        y_data = np.asarray(y_data_knee)
-    elif targets == 'knee-onset':
-        # Knee-onset points.
-        y_data = np.asarray(y_data_knee_onset)
-    else:
-        raise NotImplementedError(f'{targets}: Unknown target!')
+    # Dictionary of target values.
+    y_data = {}
+    # End-of-Life points.
+    y_data['eol'] = np.asarray(y_data_eol)
+    # Knee points.
+    y_data['knee'] = np.asarray(y_data_knee)
+    # Knee-onset points.
+    y_data['knee-onset'] = np.asarray(y_data_knee_onset)
+    # Classification labels.
+    y_data['class'] = np.asarray(y_data_class)
 
     return X_data, y_data
