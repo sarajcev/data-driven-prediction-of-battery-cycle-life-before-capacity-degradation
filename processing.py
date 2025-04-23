@@ -70,16 +70,16 @@ def filter_signal(data, window_length=20, order=3):
     """
     Remove extreme outliers and then filter the signal.
 
-    First, remove the extreme outliers that are more than
-    two standard deviations from the rolling median and then
-    smooth the signal by applying the Savitzky-Golay filter.
+    First, remove the extreme outliers using the median
+    filtering technique and then further smooth the signal
+    by applying the Savitzky-Golay filter.
 
     Parameters
     ----------
     data: array-like
         Array (1D) holding the raw signal data points.
     window_length: int, default=20
-        Window length in sample points for the moving windows,
+        Window length in sample points for the median filter
         and for the Savitzky-Golay filter.
     order: int, default=3
         Polynomial order for the Savitzky-Golay filter.
@@ -91,33 +91,17 @@ def filter_signal(data, window_length=20, order=3):
         has the same dimension as the original 1D array.
     """
     import pandas as pd
-    from scipy.signal import savgol_filter
+    from scipy.signal import medfilt, savgol_filter
 
     s = pd.Series(data, copy=True)
-    # Rolling median.
-    ma = s.rolling(window=window_length, closed='left').median().values
-    # Rolling standard deviation.
-    sd = s.rolling(window=window_length, closed='left').std().values
-    # Detect outliers that are more than two standard
-    # deviations from the rolling median.
-    lw = ma - 2*sd
-    hi = ma + 2*sd
+    if window_length % 2 == 0:
+        window_length += 1
     
-    N = len(data)
-    y = np.empty(N)
-    for i in range(N):
-        if i < window_length:
-            # First window.
-            y[i] = s.values[i]
-        else:
-            if lw[i] < s.values[i] < hi[i]:
-                y[i] = s.values[i]
-            else:
-                # Replace an outlier with the associated median value.
-                y[i] = ma[i]
+    # Median filtering.
+    sf = medfilt(s, kernel_size=window_length)
 
     # Smooth data with the Savitzky-Golay filter.
-    yhat = savgol_filter(y, window_length, order)
+    yhat = savgol_filter(sf, window_length, order)
 
     return yhat
 
@@ -162,7 +146,8 @@ def interpolate_signal(x, y, low, high):
     return a0, ai
 
 
-def get_cell_stats(data, cell_id, cycles, var, full=True):
+def get_cell_stats(data, cell_id, cycles, var, window_size=21,
+                   full=True, THR=10):
     """
     Compute statistics for a cell's measurement data. 
     
@@ -186,9 +171,14 @@ def get_cell_stats(data, cell_id, cycles, var, full=True):
         Variable name for the measured value; it can be one of
         the following: 'I', 'Qc', 'Qd', 'Qdlin', 'T', 'Tdlin', 
         'V', 'dQdV', 't'.
+    window_size: int, default=21
+        Window size for the median filtering of the signal. It
+        mast be an odd value.
     full: bool, default=True
         Indicator that determines the extent of the statistical
         features that will be computed for the measurement data.
+    THR: float, default=10
+        Bound on the legal values of the measurement data.
     
     Returns
     -------
@@ -198,15 +188,26 @@ def get_cell_stats(data, cell_id, cycles, var, full=True):
         the select number of cycles (starting from the second cycle).
     """
     from scipy.stats import mode, skew, kurtosis
+    from scipy.signal import medfilt
     from sklearn.metrics import auc  # area under a curve
     from collections import defaultdict
     
     stats_dict = defaultdict(list)
     support = data[cell_id]['Vdlin']
     for cycle_i in range(2, cycles+1):
-        # Retrieve data for each cycle.
-        arr = data[cell_id]['cycles'][str(cycle_i)][var]
-        # Compute summary statistics for each cycle.
+        # Retrieve raw data for the cycle.
+        arr_raw = data[cell_id]['cycles'][str(cycle_i)][var]
+        # Apply median filtering.
+        if window_size % 2 == 0:
+            window_size += 1  # must be odd value
+        arr = medfilt(arr_raw, kernel_size=window_size)
+        # Test against bounds on legal values.
+        if np.any(abs(arr) > THR):
+            print(f'Cell ID: {cell_id} cycle {cycle_i} {var} data out of range.')
+            # Skip this record.
+            continue
+
+        # Compute summary statistics for the cycle.
         stats_dict['min'].append(arr.min())
         stats_dict['max'].append(arr.max())
         stats_dict['mean'].append(np.mean(arr))
@@ -453,12 +454,13 @@ def get_features_targets_from_data(data_dict, end=100,
     # of the following: 'min', 'max', 'mean', 'std', 'mode', 
     # 'median', 'skew', 'kurt', 'iqr'.
     selected_stats = ['min', 'mean', 'mode', 'std', 'skew', 'kurt', 'iqr']
-
+    
+    THRESHOLD = 10.  # Bound on Qd curve legal values.
     for cell in data_dict.keys():
         cycles = data_dict[cell]['summary']['cycle']
         fade_curve = data_dict[cell]['summary']['QD']
         # Smooth the fade discharge curve.
-        fade_curve_smooth = filter_signal(fade_curve)
+        fade_curve_smooth = filter_signal(fade_curve, order=2)
         # End-of-Life cell cycle.
         cycle_life = data_dict[cell]['cycle_life'][0][0]
 
@@ -520,7 +522,6 @@ def get_features_targets_from_data(data_dict, end=100,
             raise ValueError(f'Error: {cell} knee point is negative!')
         if knee_point > eol:
             print(f'Cell ID: {cell}, Knee: {knee_point}, EoL: {eol}')
-            print(f'Warning: {cell} knee-point is beyond the EoL!')
         if knee_point <= 101:
             # Skip cell records that have estimated knee values
             # below 100 cycles (these are considered defective).
@@ -548,11 +549,9 @@ def get_features_targets_from_data(data_dict, end=100,
         if knee_onset_point > eol:
             print(f'Cell ID: {cell}, Knee-onset: {knee_onset_point}, \
                     EoL: {eol}')
-            print(f'Warning: {cell} knee-onset point is beyond the EoL!')
         if knee_onset_point > knee_point:
             print(f'Cell ID: {cell}, Knee: {knee_point}, \
                     Knee-onset: {knee_onset_point}')
-            print(f'Warning: {cell} knee-onset point is beyond the Knee point!')
         if knee_onset_point <= 101:
             # Skip cell records that have estimated knee-onset values
             # below 100 cycles (these are considered defective).
@@ -565,7 +564,15 @@ def get_features_targets_from_data(data_dict, end=100,
         # Classification features.
         Qd4 = data_dict[cell]['cycles'][str(4)]['Qdlin']  # hard-coded
         Qd5 = data_dict[cell]['cycles'][str(5)]['Qdlin']  # hard-coded
+        if np.any(abs(Qd4) > THRESHOLD):
+            raise ValueError(f'Cell ID: {cell} Qd4 cycle values out of range.')
+        if np.any(abs(Qd5) > THRESHOLD):
+            raise ValueError(f'Cell ID: {cell} Qd5 cycle values out of range.')
+        
+        # Qd(5) - Qd(4) cycles.
         deltaq = Qd5 - Qd4
+        
+        # Statistical features from dQ(5-4) curve.
         dq_stats = get_data_array_stats(deltaq)
         for key, value in dq_stats.items():
             if key in ['min', 'std']:
@@ -573,17 +580,24 @@ def get_features_targets_from_data(data_dict, end=100,
 
         # Regression features.
         voltage = data_dict[cell]['Vdlin']
+        
         # Qd cycles curves.
         Qd10 = data_dict[cell]['cycles'][str(10)]['Qdlin']  # hard-coded
         Qd100 = data_dict[cell]['cycles'][str(end)]['Qdlin']
-        # Qd(100) - Qd(10) cycles
+        if np.any(abs(Qd10) > THRESHOLD):
+            raise ValueError(f'Cell ID: {cell} Qd(10) cycle values out of range.')
+        if np.any(abs(Qd100) > THRESHOLD):
+            raise ValueError(f'Cell ID: {cell} Qd(100) cycle values out of range.')
+        
+        # Qd(100) - Qd(10) cycles.
         deltaQ = Qd100 - Qd10
         
         # Statistical features from dQ(100-10) curve.
         dQstats = get_data_array_stats(deltaQ)
         for key, value in dQstats.items():
-            # Return all calculated statistical properties.
-            X_data[key].append(value)
+            if key in selected_stats:
+                # Return only selected stats.
+                X_data[key].append(value)
         
         # Discharge capacity fade curve features.
         # Discharge capacity at cycle 2.
@@ -635,10 +649,11 @@ def get_features_targets_from_data(data_dict, end=100,
         X_data['dq_auc'].append(simpson(deltaQ, x=voltage))
         
         # dQdV cycles curves.
-        dQdV10 = np.diff(Qd10, prepend=0)  # first difference
-        dQdV100 = np.diff(Qd100, prepend=0)
+        dQdV10 = data_dict[cell]['cycles'][str(10)]['dQdV']
+        dQdV100 = data_dict[cell]['cycles'][str(end)]['dQdV']
+        
         # dQdV(100) - dQdV(10) cycles
-        delta_dQdV = dQdV100 - dQdV10
+        delta_dQdV = dQdV100 - dQdV10       
         
         # Statistical features from dQdV(100-10) curve.
         dQdVstats = get_data_array_stats(delta_dQdV)
@@ -673,15 +688,44 @@ def get_features_targets_from_data(data_dict, end=100,
         t_abs_dif = abs(t_max[1:end] - t_min[1:end])
         X_data['tadif'].append(max(t_abs_dif))
 
-        # Additional features from individual cycles.
+        # Additional features from multiple individual cycles.
         # Discharge curve features from cycles 2 to 50.
-        cell_stats_qd = get_cell_stats(data_dict, cell, 50, 'Qdlin')
+        cell_stats_qd = get_cell_stats(data_dict, cell, 50, 'Qdlin', 
+                                       window_size=20, THR=THRESHOLD)
         # Min. AUC value from the first 50 cycles.
         X_data['auc50q'].append(min(cell_stats_qd['auc']))
+        # Abs. difference between AUC values, cycles 2 and 50.
+        X_data['auc_d'].append(abs(cell_stats_qd['auc'][-1]
+                                   - cell_stats_qd['auc'][1]))
+        # Intercept and slope of the line fit through the Qd
+        # evolution of AUC values from the first 50 cycles.
+        support = np.arange(len(cell_stats_qd['auc']))
+        a0, ai = interpolate_signal(support, cell_stats_qd['auc'], 0, -1)
+        X_data['auc_a0'].append(a0)
+        X_data['auc_ai'].append(ai[0])
+        
+        # Process cycles from Qd(2) to Qd(50).
+        modes, aucs = process_multiple_deltas(data_dict, cell, 'Qdlin', 2, 50)
+        X_data['mod50'].append(modes[-1])  # Mode from Qd(50) - Qd(2)
+        X_data['auc50'].append(aucs[-1])   # AUC from Qd(50) - Qd(2)
+
         # dQ/dV curve features from cycles 2 to 50.
-        cell_stats_dqdv = get_cell_stats(data_dict, cell, 50, 'dQdV')
+        cell_stats_dqdv = get_cell_stats(data_dict, cell, 50, 'dQdV', 
+                                         window_size=20, THR=THRESHOLD)
         # Min. AUC value from the first 50 cycles.
         X_data['auc50qv'].append(min(cell_stats_dqdv['auc']))
+        # Abs. difference between AUC values, cycles 2 and 50.
+        X_data['auc_dqv'].append(abs(cell_stats_dqdv['auc'][-1]
+                                   - cell_stats_dqdv['auc'][1]))
+        # Abs. difference between modes, cycles 2 and 50.
+        X_data['md_qv'].append(abs(cell_stats_dqdv['mode'][-1] 
+                                   - cell_stats_dqdv['mode'][1]))
+        # Intercept and slope of the line fit through the dQdV
+        # evolution of AUC values from the first 50 cycles.
+        support = np.arange(len(cell_stats_dqdv['auc']))
+        a0, ai = interpolate_signal(support, cell_stats_dqdv['auc'], 0, -1)
+        X_data['auc_a0qv'].append(a0)
+        X_data['auc_aiqv'].append(ai[0])
     
     # Dictionary of target values.
     y_data = {}
@@ -695,3 +739,302 @@ def get_features_targets_from_data(data_dict, end=100,
     y_data['class'] = np.asarray(y_data_class)
 
     return X_data, y_data
+
+
+def prepare_features(X_data_dict, set_of_features):
+    """
+    Prepare features for the regression models.
+
+    Parameters
+    ----------
+    X_data: dict
+        Dictionary holding all engineered features.
+    set_of_features: str
+        Designation for the set of features that will
+        be used for the model. Following values are
+        allowed for this parameter: 'variance',
+        'discharge', 'full', 'custom'.
+    
+    Returns
+    -------
+    X_data: pd.DataFrame
+        Pandas dataframe holding only selected features.
+    """
+    import pandas as pd
+
+    if set_of_features == 'variance':
+        # Using a single feature.
+        X_data = pd.DataFrame(X_data_dict, columns=['std'])
+        X_data['std'] = np.log10(X_data['std'].values**2)
+
+    elif set_of_features == 'discharge':
+        selected_features = ['std', 'min', 'skew', 'kurt', 'qd2', 'qd_dif']
+        X_data = pd.DataFrame(X_data_dict, columns=selected_features)
+
+    elif set_of_features ==  'full':
+        selected_features = ['std', 'min', 'qd2', 'slope', 'inter', 
+                             'char5', 't_int', 'rsmin', 'rsdif']
+        X_data = pd.DataFrame(X_data_dict, columns=selected_features)
+
+    elif set_of_features == 'custom':
+        selected_features = ['min', 'std', 'kurt', 'iqr', 
+                             'dq_auc', 'auc50q', 'auc_d', 'auc_ai']
+        X_data = pd.DataFrame(X_data_dict, columns=selected_features)
+
+    elif set_of_features == '50cycles':
+        selected_features = ['auc50q', 'auc_d', 'auc_ai', 'auc50qv', 
+                             'auc_dqv', 'auc_aiqv', 'mod50', 'auc50']
+        X_data = pd.DataFrame(X_data_dict, columns=selected_features)
+
+    elif set_of_features == 'all':
+        # Using all derived features.
+        X_data = pd.DataFrame(X_data_dict)
+        # Remove classification features.
+        X_data.drop(columns=['class_min', 'class_std'], inplace=True)
+
+    else:
+        raise NotImplementedError(f'Model: {set_of_features} is not recognized!')
+    
+    return X_data
+
+
+def get_grid_values(reg):
+    """
+    Create a fixed grid of hyperparameter values.
+
+    Parameters
+    ----------
+    reg: str
+        Short code for the model type. Following 
+        values are allowed: 
+        'lin': Penalized linear regression,
+        'gen': Generalized linear regression with 
+               a Tweedie distribution,
+        'nusvr': Nu-Support Vector Machine regression,
+        'svr': Support Vector Machine regression,
+        'ard': Relevance Vector Machine regression.
+
+    Returns
+    -------
+    grid: dict
+        Dictionary with model parameters names as keys 
+        and lists of parameter settings to try as values.
+    """
+    # Grid of hyperparameters values.
+    n_values = 10
+    if reg == 'lin':
+        # ElasticNet
+        grid = {'alpha': np.logspace(-3, 3, n_values),
+                'l1_ratio': [.1, .5, .7, .9, .95, .99, 1]}
+    elif reg == 'gen':
+        # TweedieRegressor
+        grid = {'power': [0, 1.5, 2, 3],
+                'alpha': np.logspace(-3, 3, n_values)}
+    elif reg == 'nusvr':
+        # NuSVR
+        grid = {'nu': [.1, .3, .5, .7, .9, .95, .99],
+                'gamma': ['scale', 'auto'],
+                'C': np.logspace(-3, 3, n_values)}
+    elif reg == 'svr':
+        # SVR
+        grid = {'gamma': ['scale', 'auto'],
+                'C': np.logspace(-3, 3, n_values)}
+    elif reg == 'ard':
+        # ARDRegression
+        grid = {'alpha_1': np.logspace(-5, 1, n_values),
+                'alpha_2': np.linspace(0, 1, n_features),
+                'lambda_1': np.logspace(-5, 1, n_values),
+                'lambda_2': np.linspace(0, 1, n_features)}
+    else:
+        raise NotImplementedError(f'Chosen model {reg} is not implemented.')
+
+    return grid
+
+
+def run_regression(reg, X, y, train_size=0.8, 
+                   reduce_features=False, n_features=6,
+                   verbose=False):
+    """
+    Run a regression model.
+
+    This function encapsulates the complete pipeline,
+    from train and test data split, grid search with
+    cross-validation for model hyperparameters optimi-
+    zation, fiting the optimal model on the train set 
+    and predicting on test data set, to finally compu-
+    ting the RMSE and MAPE errors on the test set.
+
+    Parameters
+    ----------
+    reg: str
+        Short code for the model type. Following 
+        values are allowed: 
+        'lin': Penalized linear regression,
+        'gen': Generalized linear regression with 
+               a Tweedie distribution,
+        'nusvr': Nu-Support Vector Machine regression,
+        'svr': Support Vector Machine regression,
+        'ard': Relevance Vector Machine regression.
+    X: 2d-array
+        Matrix of features (predictors).
+    y: 1d-array
+        Vector of targets (predicted variable).
+    train_size: float, default=0.8
+        Size of the train set (0, 1).
+    reduce_features: bool, default=False
+        Indicator for activating fetaures reduction
+        option of the data processing pipeline.
+    n_features, int, default=6
+        Number of features to retain after the features
+        reduction process.
+    verbose: bool, default=False
+        Print diagnostic information.
+    
+    Returns
+    -------
+    rmse: float
+        Root mean squared error on the test set.
+    mape: float
+        Mean absolute percentage error on the test set.
+    """
+    from sklearn import svm
+    from sklearn.linear_model import ElasticNet, TweedieRegressor, ARDRegression
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.feature_selection import RFE
+    from sklearn.pipeline import Pipeline
+    from sklearn.model_selection import train_test_split
+    from sklearn.metrics import root_mean_squared_error
+    from sklearn.metrics import mean_absolute_percentage_error
+    from sklearn.model_selection import GridSearchCV
+
+    # Split dataset into train and test sets.
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, train_size=train_size, shuffle=True
+    )
+
+    if reg == 'lin':
+        # Penalized linear regression.
+        reg_model = ElasticNet(max_iter=10_000)
+    elif reg == 'gen':
+        # Generalized linear regression with a Tweedie distribution.
+        reg_model = TweedieRegressor(max_iter=1000)
+    elif reg == 'nusvr':
+        # Nu-Support Vector Machine regression.
+        reg_model = svm.NuSVR(kernel='rbf')
+    elif reg == 'svr':
+        # Support Vector Machine regression.
+        reg_model = svm.SVR(kernel='rbf')
+    elif reg == 'ard':
+        # Relevance Vector Machine regression.
+        reg_model = ARDRegression()
+    else:
+        raise NotImplementedError(f'Chosen model {reg} is not implemented.')
+
+    # Get a fixed grid of hyperparameter values.
+    grid = get_grid_values(reg)
+
+    # Hyperparameters optimization with grid search and cross-validation.
+    grid_search = GridSearchCV(estimator=reg_model, param_grid=grid, 
+                               scoring='neg_root_mean_squared_error', 
+                               cv=3, refit=True, n_jobs=-1)
+    # Pipeline.
+    if reduce_features:
+        model = Pipeline([
+            ('scale', StandardScaler()),
+            # Recursive features elimination.
+            ('selct', RFE(estimator=svm.SVR(kernel='linear'), 
+                        n_features_to_select=n_features)),
+            ('model', grid_search)
+        ])
+    else:
+        model = Pipeline([
+            ('scale', StandardScaler()),
+            ('model', grid_search)
+        ])
+
+    # Model fit on train set.
+    model.fit(X_train, np.log10(y_train))
+    if verbose:
+        print(model['model'].best_params_)
+
+    # Predicted values.
+    y_pred = model.predict(X_test)
+    y_pred = 10**y_pred  # return back to targets
+
+    # Errors from the test set.
+    rmse = root_mean_squared_error(y_test, y_pred)
+    mape = mean_absolute_percentage_error(y_test, y_pred)
+
+    return rmse, mape*100.
+
+
+if __name__ == '__main__':
+    import os
+    import pickle
+
+    # Input parameters:
+    # ----------------
+    targets = 'eol'  # ['eol', 'knee', 'knee-onset']
+    set_of_features = 'custom'  # ['variance', 'discharge', 'full', 'custom', 'all', '50cycles']
+    reg = 'nusvr'  # ['lin', 'gen', 'nusvr', 'svr', 'ard']
+    # Additional options:
+    reduce_features = False
+    n_features = 6    # number of features to retain
+    verbose = False   # print optimal hyperparameters
+    is_pickle = True  # data format (pickle or matlab)
+
+    print('Importing data ...')
+    # Import data from the external file.
+    path = os.path.dirname('/home/ps/Documents/Batteries/')  # EDIT HERE
+    file_name = '2018-02-20_batchdata_updated_struct_errorcorrect'
+    if is_pickle:
+        # Import from a pickle file.
+        pickle_file = file_name+'.pkl'
+        file_path = os.path.join(path, pickle_file)
+        fp = open(file=file_path, mode='rb')
+        bat_dict = pickle.load(fp)
+        fp.close()
+    else:
+        # Import from a matlab file.
+        matlab_file = file_name+'.mat'
+        file_path = os.path.join(path, matlab_file)
+        bat_dict = import_dataset(file_path)
+
+    print('Extracting features ...')
+    # Extract features from data.
+    X_data_dict, y_data_dict = get_features_targets_from_data(
+        bat_dict, skip_outliers=False
+    )
+    # Prepare features.
+    X_data = prepare_features(X_data_dict, set_of_features)
+
+    # Prepare targets.
+    y_data = y_data_dict[targets]
+
+    print('\nRunning model ...')
+    if reg == 'lin':
+        model_name = 'ElasticNet'
+    elif reg == 'gen':
+        model_name = 'TweedieRegressor'
+    elif reg == 'nusvr':
+        model_name = 'NuSVR'
+    elif reg == 'svr':
+        model_name = 'SVR'
+    elif reg == 'ard':
+        model_name = 'ARD'
+    else:
+        raise NotImplementedError(f'Model {reg} is not recognized.')
+
+    # Running the regression analysis multiple times 
+    # to acquire summary performance statistics.
+    num_runs = 5
+    rmse, mape = [], []
+    for i in range(num_runs):
+        r, m = run_regression(reg, X_data, y_data, verbose=verbose)
+        rmse.append(r)
+        mape.append(m)
+
+    print(f'\nPredicting "{targets}" using "{set_of_features}" set of features.')
+    print(f'Test errors from {num_runs} runs ({model_name}):')
+    print(f'RMSE: {np.mean(rmse):.2f} +/- {np.std(rmse):.2f} cycles')
+    print(f'MAPE: {np.mean(mape):.2f} +/- {np.std(mape):.2f} %')
