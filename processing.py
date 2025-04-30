@@ -741,7 +741,67 @@ def get_features_targets_from_data(data_dict, end=100,
     return X_data, y_data
 
 
-def prepare_features(X_data_dict, set_of_features):
+def cluster_membership(X_data, metric='euclidean', 
+                       graph_structure=False, n_neighbors=5, 
+                       linkage='ward'):
+    """
+    Cluster analysis on top of the features.
+
+    Agglomerative lustering is appled to features in order
+    to separate battery cells into two independent clusters.
+    Hopefully, clustering will identify battery cell samples 
+    with short and long life and differentiate between them.
+
+    Parameters
+    ----------
+    X_data: DataFrame
+        Pandas DataFrame holding selected features for 
+        each battery cell.
+    metric: str, default='euclidean'
+        Metric used to compute the linkage. Can be 
+        'euclidean', 'l1', 'l2', 'manhattan', 'cosine'.
+    graph_structure: bool, default=False
+        Generate connectivity matrix from the k-neighbors
+        graph analysis.
+    n_neighbors: int, default=5
+        Number of neighbors for each sample, for the
+        k-neighbors graph analysis.
+    linkage: str, default='ward'
+        Linkage criterion to use. Can be 'ward', 
+        'complete', 'average', 'single'.
+        
+    Returns
+    -------
+    cluster_labels: list
+        List of cluster membership labels for each 
+        battery cell sample.
+    """
+    from sklearn.neighbors import kneighbors_graph
+    from sklearn.cluster import AgglomerativeClustering
+
+    if graph_structure:
+        graph = kneighbors_graph(X_data.values, n_neighbors=n_neighbors, 
+                                 metric=metric, n_jobs=-1)
+    else:
+        graph = None
+    
+    # Perform an agglomerative clustering. 
+    clustering = AgglomerativeClustering(
+        n_clusters=2,
+        metric=metric,
+        connectivity=graph,
+        linkage=linkage
+    )
+    clustering.fit(X_data.values)
+    
+    # Extract cluster memberships.
+    cluster_labels = clustering.labels_
+
+    return cluster_labels
+
+
+def prepare_features(X_data_dict, set_of_features, 
+                     cluster=False, **kwargs):
     """
     Prepare features for the regression models.
 
@@ -753,12 +813,17 @@ def prepare_features(X_data_dict, set_of_features):
         Designation for the set of features that will
         be used for the model. Following values are
         allowed for this parameter: 'variance',
-        'discharge', 'full', 'custom'.
-    
+        'discharge', 'full', 'custom', 'all'.
+    cluster: bool, default=False
+        Apply clustering analysis on top of the features.
+    kwargs: dict
+        Additional parameters passed down to the clustering
+        function.
+        
     Returns
     -------
     X_data: pd.DataFrame
-        Pandas dataframe holding only selected features.
+        Pandas dataframe holding selected features.
     """
     import pandas as pd
 
@@ -795,6 +860,11 @@ def prepare_features(X_data_dict, set_of_features):
     else:
         raise NotImplementedError(f'Model: {set_of_features} is not recognized!')
     
+    if cluster:
+        # Perform clustering on selected features and
+        # add cluster memberships as a new feature.
+        X_data['cluster'] = cluster_membership(X_data.copy(), **kwargs)
+
     return X_data
 
 
@@ -902,16 +972,22 @@ def run_regression(reg, X, y, train_size=0.8,
     from sklearn.preprocessing import StandardScaler
     from sklearn.feature_selection import RFE
     from sklearn.pipeline import Pipeline
+    from sklearn.compose import ColumnTransformer
     from sklearn.model_selection import train_test_split
     from sklearn.metrics import root_mean_squared_error
     from sklearn.metrics import mean_absolute_percentage_error
     from sklearn.model_selection import GridSearchCV
 
+    if reduce_features and n_features > len(X.columns):
+            raise ValueError(f'Cannot reduce features with: {n_features} > {len(X.columns)}!')
+    
     # Split dataset into train and test sets.
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, train_size=train_size, shuffle=True
     )
-
+    # List of numerical features.
+    num_features = [name for name in X.columns if name != 'cluster']
+    
     if reg == 'lin':
         # Penalized linear regression.
         reg_model = ElasticNet(max_iter=10_000)
@@ -940,15 +1016,21 @@ def run_regression(reg, X, y, train_size=0.8,
     # Pipeline.
     if reduce_features:
         model = Pipeline([
-            ('scale', StandardScaler()),
+            # Transform only numerical features.
+            ('transform', ColumnTransformer(
+                [('scale', StandardScaler(), num_features)], 
+                remainder='passthrough')),
             # Recursive features elimination.
-            ('selct', RFE(estimator=svm.SVR(kernel='linear'), 
-                        n_features_to_select=n_features)),
+            ('select', RFE(estimator=svm.SVR(kernel='linear'), 
+                           n_features_to_select=n_features)),
             ('model', grid_search)
         ])
     else:
         model = Pipeline([
-            ('scale', StandardScaler()),
+            # Transform only numerical features.
+            ('transform', ColumnTransformer(
+                [('scale', StandardScaler(), num_features)], 
+                remainder='passthrough')),
             ('model', grid_search)
         ])
 
@@ -975,42 +1057,48 @@ if __name__ == '__main__':
     # Input parameters:
     # ----------------
     targets = 'eol'  # ['eol', 'knee', 'knee-onset']
-    set_of_features = 'custom'  # ['variance', 'discharge', 'full', 'custom', 'all', '50cycles']
+    set_of_features = 'custom'  # ['variance', 'discharge', 'full', 'custom', 'all']
     reg = 'nusvr'  # ['lin', 'gen', 'nusvr', 'svr', 'ard']
     # Additional options:
-    reduce_features = False
-    n_features = 6    # number of features to retain
-    verbose = False   # print optimal hyperparameters
-    is_pickle = True  # data format (pickle or matlab)
+    is_pickle = True     # Data format (pickle or matlab).
+    reduce_features = False  # Reduce nmber of features.
+    n_features = 6    # Number of features to retain.
+    verbose = False   # Print optimal hyperparameters.
+    cluster = True   # Use clustering analysis on features.
 
     print('Importing data ...')
     # Import data from the external file.
-    path = os.path.dirname('/home/ps/Documents/Batteries/')  # EDIT HERE
+    path = os.path.dirname('/home/ps/Documents/Batteries/Data/')  # EDIT HERE
     file_name = '2018-02-20_batchdata_updated_struct_errorcorrect'
+
     if is_pickle:
-        # Import from a pickle file.
+        # Import data from a pickle file (faster).
         pickle_file = file_name+'.pkl'
         file_path = os.path.join(path, pickle_file)
         fp = open(file=file_path, mode='rb')
         bat_dict = pickle.load(fp)
         fp.close()
     else:
-        # Import from a matlab file.
+        # Import data from a matlab file (slower).
         matlab_file = file_name+'.mat'
         file_path = os.path.join(path, matlab_file)
         bat_dict = import_dataset(file_path)
-
+        # Export data into a pickle file.
+        fp = open(file=file_name+'.pkl', mode='wb')
+        pickle.dump(bat_dict, file=fp)
+        fp.close()
+    
     print('Extracting features ...')
     # Extract features from data.
     X_data_dict, y_data_dict = get_features_targets_from_data(
         bat_dict, skip_outliers=False
     )
     # Prepare features.
-    X_data = prepare_features(X_data_dict, set_of_features)
+    X_data = prepare_features(X_data_dict, set_of_features, cluster=cluster)
 
     # Prepare targets.
     y_data = y_data_dict[targets]
-
+    
     print('\nRunning model ...')
     if reg == 'lin':
         model_name = 'ElasticNet'
@@ -1030,7 +1118,10 @@ if __name__ == '__main__':
     num_runs = 5
     rmse, mape = [], []
     for i in range(num_runs):
-        r, m = run_regression(reg, X_data, y_data, verbose=verbose)
+        r, m = run_regression(reg, X_data, y_data, 
+                              reduce_features=reduce_features, 
+                              n_features=n_features, 
+                              verbose=verbose)
         rmse.append(r)
         mape.append(m)
 
