@@ -212,7 +212,9 @@ def get_cell_stats(data, cell_id, cycles, var, window_size=21,
         stats_dict['max'].append(arr.max())
         stats_dict['mean'].append(np.mean(arr))
         stats_dict['std'].append(np.std(arr))
+        
         if full:
+            # Compute additional statistical features.
             stats_dict['mode'].append(mode(arr)[0])
             stats_dict['skew'].append(skew(arr))  # skewness
             stats_dict['kurt'].append(kurtosis(arr))  # kurtosis (Fisher)
@@ -220,7 +222,15 @@ def get_cell_stats(data, cell_id, cycles, var, window_size=21,
             q25 = np.quantile(arr, 0.25)
             q75 = np.quantile(arr, 0.75)
             stats_dict['iqr'] = q75 - q25
-            stats_dict['auc'].append(auc(support, arr))  # AUC
+
+        if var == 'V':
+            # Time interval of equal discharge voltage drop (TIE-DVD).
+            idx = np.argwhere(abs(arr - 3.0) <= 1e-2)
+            tie_dvd = idx[-1][0] - idx[0][0]
+            stats_dict['tie-dvd'].append(tie_dvd)
+        else:
+            # Area under the curve.
+            stats_dict['auc'].append(auc(support, arr))
 
     return stats_dict
 
@@ -262,7 +272,8 @@ def get_data_array_stats(data_array, full=True):
     return stats_dict
 
 
-def process_multiple_deltas(data, cell_id, var, start, stop, step=1):
+def process_multiple_deltas(data, cell_id, var, 
+                            start, stop, step=1, THR=50):
     """ 
     Compute mode and AUC for multiple delta curves, for 
     any cell and any measured variable of interest.
@@ -293,6 +304,11 @@ def process_multiple_deltas(data, cell_id, var, start, stop, step=1):
         Step value for the cycles between `start` and `stop`.
         By default, each cycle between start and stop will
         be processed.
+    THR: float, default=50
+        Threshold value on the AUC. If the discharge curve
+        is corrupted with measurement noise the computed AUC 
+        may not have a meaningful value. This is tested for 
+        by comparing the AUC value with a THR range.
 
     Returns
     -------
@@ -317,7 +333,11 @@ def process_multiple_deltas(data, cell_id, var, start, stop, step=1):
         qi = data[cell_id]['cycles'][str(i)][var]
         deltaQ = qi - q0
         # Area under the curve using Simpson's integration.
-        aucs.append(simpson(deltaQ, x=support))
+        auc = simpson(deltaQ, x=support)
+        # Test if the AUC value is out of range.
+        if auc < -THR or auc > THR:
+            auc = aucs[-1]  # forward fill
+        aucs.append(auc)
         # Assuming no multi-modal curves.
         modes.append(mode(deltaQ)[0])
         k += 1
@@ -441,6 +461,13 @@ def get_features_targets_from_data(data_dict, end=100,
     Identification and machine learning prediction of 
     knee-point and knee-onset in capacity degradation curves 
     of lithium-ion cells, Energy and AI, Volume 1, 2020.
+
+    Datong Liu, Yuchen Song, Lyu Li, Haitao Liao, Yu Peng, 
+    On-line life cycle health assessment for lithium-ion 
+    battery in electric vehicles, Journal of Cleaner Production, 
+    Vol. 199, 2018, pp. 1050-1065, 
+    https://doi.org/10.1016/j.jclepro.2018.06.182.
+
     """
     from collections import defaultdict
     from scipy.integrate import simpson
@@ -518,15 +545,9 @@ def get_features_targets_from_data(data_dict, end=100,
         
         # Check the validity of the estimated knee point.
         if knee_point < 0:
-            print(f'Cell ID: {cell}, Knee: {knee_point}')
             raise ValueError(f'Error: {cell} knee point is negative!')
         if knee_point > eol:
             print(f'Cell ID: {cell}, Knee: {knee_point}, EoL: {eol}')
-        if knee_point <= 101:
-            # Skip cell records that have estimated knee values
-            # below 100 cycles (these are considered defective).
-            print(f'Skipping cell ID: {cell} with Knee: {knee_point}.')
-            continue
         
         # Append knee point value.
         y_data_knee.append(knee_point)
@@ -544,20 +565,10 @@ def get_features_targets_from_data(data_dict, end=100,
         if popt_onset[4] > popt_onset[5]:
             print('Warning: Issues with a Bacon-Watts fit detected.')
         if knee_onset_point < 0:
-            print(f'Cell ID: {cell}, Knee-onset: {knee_onset_point}')
             raise ValueError(f'Error: {cell} knee-onset point is negative!')
-        if knee_onset_point > eol:
-            print(f'Cell ID: {cell}, Knee-onset: {knee_onset_point}, \
-                    EoL: {eol}')
-        if knee_onset_point > knee_point:
-            print(f'Cell ID: {cell}, Knee: {knee_point}, \
-                    Knee-onset: {knee_onset_point}')
-        if knee_onset_point <= 101:
-            # Skip cell records that have estimated knee-onset values
-            # below 100 cycles (these are considered defective).
-            print(f'Skipping cell ID: {cell} with Knee-onset: {knee_onset_point}.')
-            continue
-        
+        if knee_onset_point > min(eol, knee_point):
+            print(f'Cell ID: {cell}, Knee: {knee_point}, Knee-onset: {knee_onset_point}, EoL: {eol}')
+                
         # Append knee-onset point value.
         y_data_knee_onset.append(knee_onset_point)
                 
@@ -602,8 +613,8 @@ def get_features_targets_from_data(data_dict, end=100,
         # Discharge capacity fade curve features.
         # Discharge capacity at cycle 2.
         Qd2 = fade_curve_smooth[1]
-        if Qd2 > 1.15 or Qd2 < 0.8:
-            raise ValueError('Discharge capacity at cycle 2 is out of bounds.')
+        if Qd2 > 1.15:
+            raise ValueError(f'Cell ID: {cell} Discharge capacity at cycle 2 is out of bounds.')
         X_data['qd2'].append(Qd2)
         # Difference between max discharge capacity and cycle 2.
         X_data['qd_dif'].append(fade_curve_smooth.max() - Qd2)
@@ -688,6 +699,12 @@ def get_features_targets_from_data(data_dict, end=100,
         t_abs_dif = abs(t_max[1:end] - t_min[1:end])
         X_data['tadif'].append(max(t_abs_dif))
 
+        # Time interval of equal discharge voltage drop (TIE-DVD) at cycle 100.
+        volt_end = data_dict[cell]['cycles'][str(end)]['V']
+        idx = np.argwhere(abs(volt_end - 3.0) <= 1e-2)
+        tie_dvd = idx[-1][0] - idx[0][0]
+        X_data['tie-dvd'].append(tie_dvd)
+
         # Additional features from multiple individual cycles.
         # Discharge curve features from cycles 2 to 50.
         cell_stats_qd = get_cell_stats(data_dict, cell, 50, 'Qdlin', 
@@ -726,6 +743,16 @@ def get_features_targets_from_data(data_dict, end=100,
         a0, ai = interpolate_signal(support, cell_stats_dqdv['auc'], 0, -1)
         X_data['auc_a0qv'].append(a0)
         X_data['auc_aiqv'].append(ai[0])
+
+        # Intercept and slope of the line fit through the
+        # time interval of equal discharge voltage drop (TIE-DVD)
+        # evolution between cycles 2 and 50.
+        cell_stats_volt = get_cell_stats(data_dict, cell, 50, 'V',
+                                         window_size=20, THR=THRESHOLD)
+        a0, ai = interpolate_signal(np.arange(len(cell_stats_volt['tie-dvd'])), 
+                                    cell_stats_volt['tie-dvd'], 0, -1)
+        X_data['tie_a0'].append(a0)
+        X_data['tie_ai'].append(ai[0])
     
     # Dictionary of target values.
     y_data = {}
@@ -842,13 +869,13 @@ def prepare_features(X_data_dict, set_of_features,
         X_data = pd.DataFrame(X_data_dict, columns=selected_features)
 
     elif set_of_features == 'custom':
-        selected_features = ['min', 'std', 'kurt', 'iqr', 
+        selected_features = ['min', 'std', 'kurt', 'iqr', 'tie-dvd',
                              'dq_auc', 'auc50q', 'auc_d', 'auc_ai']
         X_data = pd.DataFrame(X_data_dict, columns=selected_features)
 
     elif set_of_features == '50cycles':
         selected_features = ['auc50q', 'auc_d', 'auc_ai', 'auc50qv', 
-                             'auc_dqv', 'auc_aiqv', 'mod50', 'auc50']
+                             'auc_dqv', 'auc_aiqv', 'mod50', 'auc50', 'tie_a0']
         X_data = pd.DataFrame(X_data_dict, columns=selected_features)
 
     elif set_of_features == 'all':
@@ -1060,7 +1087,6 @@ if __name__ == '__main__':
     set_of_features = 'custom'  # ['variance', 'discharge', 'full', 'custom', 'all']
     reg = 'nusvr'  # ['lin', 'gen', 'nusvr', 'svr', 'ard']
     # Additional options:
-    is_pickle = True     # Data format (pickle or matlab).
     reduce_features = False  # Reduce nmber of features.
     n_features = 6    # Number of features to retain.
     verbose = False   # Print optimal hyperparameters.
@@ -1069,26 +1095,14 @@ if __name__ == '__main__':
     print('Importing data ...')
     # Import data from the external file.
     path = os.path.dirname('/home/ps/Documents/Batteries/Data/')  # EDIT HERE
-    file_name = '2018-02-20_batchdata_updated_struct_errorcorrect'
-
-    if is_pickle:
-        # Import data from a pickle file (faster).
-        pickle_file = file_name+'.pkl'
-        file_path = os.path.join(path, pickle_file)
-        fp = open(file=file_path, mode='rb')
-        bat_dict = pickle.load(fp)
-        fp.close()
-    else:
-        # Import data from a matlab file (slower).
-        matlab_file = file_name+'.mat'
-        file_path = os.path.join(path, matlab_file)
-        bat_dict = import_dataset(file_path)
-        # Export data into a pickle file.
-        fp = open(file=file_name+'.pkl', mode='wb')
-        pickle.dump(bat_dict, file=fp)
-        fp.close()
+    # Data is stored as a pickle file.
+    pickle_file = 'batchdata_all.pkl'  # EDIT HERE
+    file_path = os.path.join(path, pickle_file)
+    fp = open(file=file_path, mode='rb')
+    bat_dict = pickle.load(fp)
+    fp.close()
     
-    print('Extracting features ...')
+    print('\nExtracting features ...')
     # Extract features from data.
     X_data_dict, y_data_dict = get_features_targets_from_data(
         bat_dict, skip_outliers=False
