@@ -518,15 +518,9 @@ def get_features_targets_from_data(data_dict, end=100,
         
         # Check the validity of the estimated knee point.
         if knee_point < 0:
-            print(f'Cell ID: {cell}, Knee: {knee_point}')
             raise ValueError(f'Error: {cell} knee point is negative!')
         if knee_point > eol:
             print(f'Cell ID: {cell}, Knee: {knee_point}, EoL: {eol}')
-        if knee_point <= 101:
-            # Skip cell records that have estimated knee values
-            # below 100 cycles (these are considered defective).
-            print(f'Skipping cell ID: {cell} with Knee: {knee_point}.')
-            continue
         
         # Append knee point value.
         y_data_knee.append(knee_point)
@@ -544,20 +538,10 @@ def get_features_targets_from_data(data_dict, end=100,
         if popt_onset[4] > popt_onset[5]:
             print('Warning: Issues with a Bacon-Watts fit detected.')
         if knee_onset_point < 0:
-            print(f'Cell ID: {cell}, Knee-onset: {knee_onset_point}')
             raise ValueError(f'Error: {cell} knee-onset point is negative!')
-        if knee_onset_point > eol:
-            print(f'Cell ID: {cell}, Knee-onset: {knee_onset_point}, \
-                    EoL: {eol}')
-        if knee_onset_point > knee_point:
-            print(f'Cell ID: {cell}, Knee: {knee_point}, \
-                    Knee-onset: {knee_onset_point}')
-        if knee_onset_point <= 101:
-            # Skip cell records that have estimated knee-onset values
-            # below 100 cycles (these are considered defective).
-            print(f'Skipping cell ID: {cell} with Knee-onset: {knee_onset_point}.')
-            continue
-        
+        if knee_onset_point > min(eol, knee_point):
+            print(f'Cell ID: {cell}, Knee: {knee_point}, Knee-onset: {knee_onset_point}, EoL: {eol}')
+                
         # Append knee-onset point value.
         y_data_knee_onset.append(knee_onset_point)
                 
@@ -602,8 +586,8 @@ def get_features_targets_from_data(data_dict, end=100,
         # Discharge capacity fade curve features.
         # Discharge capacity at cycle 2.
         Qd2 = fade_curve_smooth[1]
-        if Qd2 > 1.15 or Qd2 < 0.8:
-            raise ValueError('Discharge capacity at cycle 2 is out of bounds.')
+        if Qd2 > 1.15:
+            raise ValueError(f'Cell ID: {cell} Discharge capacity at cycle 2 is out of bounds.')
         X_data['qd2'].append(Qd2)
         # Difference between max discharge capacity and cycle 2.
         X_data['qd_dif'].append(fade_curve_smooth.max() - Qd2)
@@ -1060,7 +1044,6 @@ if __name__ == '__main__':
     set_of_features = 'custom'  # ['variance', 'discharge', 'full', 'custom', 'all']
     reg = 'nusvr'  # ['lin', 'gen', 'nusvr', 'svr', 'ard']
     # Additional options:
-    is_pickle = True     # Data format (pickle or matlab).
     reduce_features = False  # Reduce nmber of features.
     n_features = 6    # Number of features to retain.
     verbose = False   # Print optimal hyperparameters.
@@ -1069,24 +1052,12 @@ if __name__ == '__main__':
     print('Importing data ...')
     # Import data from the external file.
     path = os.path.dirname('/home/ps/Documents/Batteries/Data/')  # EDIT HERE
-    file_name = '2018-02-20_batchdata_updated_struct_errorcorrect'
-
-    if is_pickle:
-        # Import data from a pickle file (faster).
-        pickle_file = file_name+'.pkl'
-        file_path = os.path.join(path, pickle_file)
-        fp = open(file=file_path, mode='rb')
-        bat_dict = pickle.load(fp)
-        fp.close()
-    else:
-        # Import data from a matlab file (slower).
-        matlab_file = file_name+'.mat'
-        file_path = os.path.join(path, matlab_file)
-        bat_dict = import_dataset(file_path)
-        # Export data into a pickle file.
-        fp = open(file=file_name+'.pkl', mode='wb')
-        pickle.dump(bat_dict, file=fp)
-        fp.close()
+    # Data is stored as a pickle file.
+    pickle_file = 'batchdata_all.pkl'  # EDIT HERE
+    file_path = os.path.join(path, pickle_file)
+    fp = open(file=file_path, mode='rb')
+    bat_dict = pickle.load(fp)
+    fp.close()
     
     print('Extracting features ...')
     # Extract features from data.
