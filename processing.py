@@ -106,7 +106,7 @@ def filter_signal(data, window_length=20, order=3):
     return yhat
 
 
-def interpolate_signal(x, y, low, high):
+def interpolate_signal(x, y, low, high, robust=False):
     """
     Linear interpolation of the signal.
 
@@ -128,18 +128,26 @@ def interpolate_signal(x, y, low, high):
         Index of the ending point for the interpolation.
         This is the last cycle number of the discharge curve
         that will be used for the interpolation.
+    robust: bool, default=False
+        If True, linear interpolation of the signal is
+        carried out using the robust Huber regressor;
+        otherwise, it is a simple OLS linear regression.
     
     Returns
     -------
-    a0, ai: floats
+    a0, ai: float, list
         Intercept (a0) and slope (ai) of the linear fit 
         through the signal data (between starting and ending 
         points as defined with `low` and `high` parameters).
     """
     from sklearn import linear_model
 
-    lm = linear_model.LinearRegression()
-    lm.fit(x[low:high].reshape(-1,1), y[low:high])
+    if robust:
+        lm = linear_model.HuberRegressor()
+    else:
+        lm = linear_model.LinearRegression()
+    
+    lm.fit(x[low:high].reshape(-1,1), y[low:high])  # 1D-data
     a0 = lm.intercept_  # intercept
     ai = lm.coef_       # slope (list)
 
@@ -567,7 +575,8 @@ def get_features_targets_from_data(data_dict, end=100,
         if knee_onset_point < 0:
             raise ValueError(f'Error: {cell} knee-onset point is negative!')
         if knee_onset_point > min(eol, knee_point):
-            print(f'Cell ID: {cell}, Knee: {knee_point}, Knee-onset: {knee_onset_point}, EoL: {eol}')
+            print(f'Cell ID: {cell}, Knee: {knee_point}, \
+                  Knee-onset: {knee_onset_point}, EoL: {eol}')
                 
         # Append knee-onset point value.
         y_data_knee_onset.append(knee_onset_point)
@@ -598,7 +607,7 @@ def get_features_targets_from_data(data_dict, end=100,
         if np.any(abs(Qd10) > THRESHOLD):
             raise ValueError(f'Cell ID: {cell} Qd(10) cycle values out of range.')
         if np.any(abs(Qd100) > THRESHOLD):
-            raise ValueError(f'Cell ID: {cell} Qd(100) cycle values out of range.')
+            raise ValueError(f'Cell ID: {cell} Qd({end}) cycle values out of range.')
         
         # Qd(100) - Qd(10) cycles.
         deltaQ = Qd100 - Qd10
@@ -614,7 +623,8 @@ def get_features_targets_from_data(data_dict, end=100,
         # Discharge capacity at cycle 2.
         Qd2 = fade_curve_smooth[1]
         if Qd2 > 1.15:
-            raise ValueError(f'Cell ID: {cell} Discharge capacity at cycle 2 is out of bounds.')
+            raise ValueError(f'Cell ID: {cell} Discharge capacity at cycle 2 \
+                             is out of bounds.')
         X_data['qd2'].append(Qd2)
         # Difference between max discharge capacity and cycle 2.
         X_data['qd_dif'].append(fade_curve_smooth.max() - Qd2)
@@ -627,9 +637,10 @@ def get_features_targets_from_data(data_dict, end=100,
         X_data['inter'].append(intercept)
         
         # Linear fit to the discharge fade curve between cycles 90 and 100.
-        interc, slope = interpolate_signal(cycles, fade_curve_smooth, end-10, end)
+        intercept, slope = interpolate_signal(cycles, fade_curve_smooth, 
+                                              end-10, end)
         X_data['slp9'].append(slope[0])
-        X_data['inc9'].append(interc)
+        X_data['inc9'].append(intercept)
         
         # Other features.
         # Average charge time for the first five cycles.
@@ -706,39 +717,39 @@ def get_features_targets_from_data(data_dict, end=100,
         X_data['tie-dvd'].append(tie_dvd)
 
         # Additional features from multiple individual cycles.
-        # Discharge curve features from cycles 2 to 50.
-        cell_stats_qd = get_cell_stats(data_dict, cell, 50, 'Qdlin', 
+        # Discharge curve features from cycles 2 to 100.
+        cell_stats_qd = get_cell_stats(data_dict, cell, end, 'Qdlin', 
                                        window_size=20, THR=THRESHOLD)
-        # Min. AUC value from the first 50 cycles.
+        # Min. AUC value from the first 100 cycles.
         X_data['auc50q'].append(min(cell_stats_qd['auc']))
-        # Abs. difference between AUC values, cycles 2 and 50.
+        # Abs. difference between AUC values, cycles 2 and 100.
         X_data['auc_d'].append(abs(cell_stats_qd['auc'][-1]
                                    - cell_stats_qd['auc'][1]))
         # Intercept and slope of the line fit through the Qd
-        # evolution of AUC values from the first 50 cycles.
+        # evolution of AUC values from the first 100 cycles.
         support = np.arange(len(cell_stats_qd['auc']))
         a0, ai = interpolate_signal(support, cell_stats_qd['auc'], 0, -1)
         X_data['auc_a0'].append(a0)
         X_data['auc_ai'].append(ai[0])
         
-        # Process cycles from Qd(2) to Qd(50).
-        modes, aucs = process_multiple_deltas(data_dict, cell, 'Qdlin', 2, 50)
-        X_data['mod50'].append(modes[-1])  # Mode from Qd(50) - Qd(2)
-        X_data['auc50'].append(aucs[-1])   # AUC from Qd(50) - Qd(2)
+        # Process cycles from Qd(2) to Qd(100).
+        modes, aucs = process_multiple_deltas(data_dict, cell, 'Qdlin', 2, end)
+        X_data['mod50'].append(modes[-1])  # Mode from Qd(100) - Qd(2)
+        X_data['auc50'].append(aucs[-1])   # AUC from Qd(100) - Qd(2)
 
-        # dQ/dV curve features from cycles 2 to 50.
-        cell_stats_dqdv = get_cell_stats(data_dict, cell, 50, 'dQdV', 
+        # dQ/dV curve features from cycles 2 to 100.
+        cell_stats_dqdv = get_cell_stats(data_dict, cell, end, 'dQdV', 
                                          window_size=20, THR=THRESHOLD)
-        # Min. AUC value from the first 50 cycles.
+        # Min. AUC value from the first 100 cycles.
         X_data['auc50qv'].append(min(cell_stats_dqdv['auc']))
-        # Abs. difference between AUC values, cycles 2 and 50.
+        # Abs. difference between AUC values, cycles 2 and 100.
         X_data['auc_dqv'].append(abs(cell_stats_dqdv['auc'][-1]
                                    - cell_stats_dqdv['auc'][1]))
-        # Abs. difference between modes, cycles 2 and 50.
+        # Abs. difference between modes, cycles 2 and 100.
         X_data['md_qv'].append(abs(cell_stats_dqdv['mode'][-1] 
                                    - cell_stats_dqdv['mode'][1]))
         # Intercept and slope of the line fit through the dQdV
-        # evolution of AUC values from the first 50 cycles.
+        # evolution of AUC values from the first 100 cycles.
         support = np.arange(len(cell_stats_dqdv['auc']))
         a0, ai = interpolate_signal(support, cell_stats_dqdv['auc'], 0, -1)
         X_data['auc_a0qv'].append(a0)
@@ -746,8 +757,8 @@ def get_features_targets_from_data(data_dict, end=100,
 
         # Intercept and slope of the line fit through the
         # time interval of equal discharge voltage drop (TIE-DVD)
-        # evolution between cycles 2 and 50.
-        cell_stats_volt = get_cell_stats(data_dict, cell, 50, 'V',
+        # evolution between cycles 2 and 100.
+        cell_stats_volt = get_cell_stats(data_dict, cell, end, 'V',
                                          window_size=20, THR=THRESHOLD)
         a0, ai = interpolate_signal(np.arange(len(cell_stats_volt['tie-dvd'])), 
                                     cell_stats_volt['tie-dvd'], 0, -1)
@@ -774,10 +785,11 @@ def cluster_membership(X_data, metric='euclidean',
     """
     Cluster analysis on top of the features.
 
-    Agglomerative lustering is appled to features in order
+    Agglomerative clustering is appled to features in order
     to separate battery cells into two independent clusters.
     Hopefully, clustering will identify battery cell samples 
-    with short and long life and differentiate between them.
+    with short and long life and differentiate between them,
+    which may help inform regression analysis.
 
     Parameters
     ----------
@@ -869,16 +881,11 @@ def prepare_features(X_data_dict, set_of_features,
         X_data = pd.DataFrame(X_data_dict, columns=selected_features)
 
     elif set_of_features == 'custom':
-        selected_features = ['min', 'std', 'kurt', 'iqr', 'tie-dvd',
-                             'dq_auc', 'auc50q', 'auc_d', 'auc_ai']
+        selected_features = ['mode', 'std', 'kurt', 'iqr', 'dqdv_iqr',
+                             'dq_auc', 'auc50q', 'auc_ai', 'tie_a0']
         X_data = pd.DataFrame(X_data_dict, columns=selected_features)
 
-    elif set_of_features == '50cycles':
-        selected_features = ['auc50q', 'auc_d', 'auc_ai', 'auc50qv', 
-                             'auc_dqv', 'auc_aiqv', 'mod50', 'auc50', 'tie_a0']
-        X_data = pd.DataFrame(X_data_dict, columns=selected_features)
-
-    elif set_of_features == 'all':
+    elif set_of_features in ['all', 'vif']:
         # Using all derived features.
         X_data = pd.DataFrame(X_data_dict)
         # Remove classification features.
@@ -895,7 +902,7 @@ def prepare_features(X_data_dict, set_of_features,
     return X_data
 
 
-def get_grid_values(reg):
+def get_grid_values(reg, n_values):
     """
     Create a fixed grid of hyperparameter values.
 
@@ -910,6 +917,9 @@ def get_grid_values(reg):
         'nusvr': Nu-Support Vector Machine regression,
         'svr': Support Vector Machine regression,
         'ard': Relevance Vector Machine regression.
+    n_values: int
+        Number of grid points for the `alpha`, `lambda` 
+        and `C` hyperparameters.
 
     Returns
     -------
@@ -918,7 +928,6 @@ def get_grid_values(reg):
         and lists of parameter settings to try as values.
     """
     # Grid of hyperparameters values.
-    n_values = 10
     if reg == 'lin':
         # ElasticNet
         grid = {'alpha': np.logspace(-3, 3, n_values),
@@ -950,7 +959,7 @@ def get_grid_values(reg):
 
 def run_regression(reg, X, y, train_size=0.8, 
                    reduce_features=False, n_features=6,
-                   verbose=False):
+                   n_values=10, verbose=False):
     """
     Run a regression model.
 
@@ -984,6 +993,8 @@ def run_regression(reg, X, y, train_size=0.8,
     n_features, int, default=6
         Number of features to retain after the features
         reduction process.
+    n_values: int, default=10
+        Number of grid points for hyperparameters optimization.
     verbose: bool, default=False
         Print diagnostic information.
     
@@ -1014,7 +1025,7 @@ def run_regression(reg, X, y, train_size=0.8,
     )
     # List of numerical features.
     num_features = [name for name in X.columns if name != 'cluster']
-    
+
     if reg == 'lin':
         # Penalized linear regression.
         reg_model = ElasticNet(max_iter=10_000)
@@ -1034,7 +1045,7 @@ def run_regression(reg, X, y, train_size=0.8,
         raise NotImplementedError(f'Chosen model {reg} is not implemented.')
 
     # Get a fixed grid of hyperparameter values.
-    grid = get_grid_values(reg)
+    grid = get_grid_values(reg, n_values)
 
     # Hyperparameters optimization with grid search and cross-validation.
     grid_search = GridSearchCV(estimator=reg_model, param_grid=grid, 
@@ -1042,6 +1053,8 @@ def run_regression(reg, X, y, train_size=0.8,
                                cv=3, refit=True, n_jobs=-1)
     # Pipeline.
     if reduce_features:
+        if n_features > len(X.columns):
+            raise ValueError(f'Cannot reduce features: {n_features} > {len(X.columns)}')
         model = Pipeline([
             # Transform only numerical features.
             ('transform', ColumnTransformer(
@@ -1077,20 +1090,70 @@ def run_regression(reg, X, y, train_size=0.8,
     return rmse, mape*100.
 
 
+def vif_features(X_data_dict, y_data, pool, 
+                 lim_min=0.5, lim_max=0.8):
+    """ Top features from the VIF pool.
+
+    Parameters
+    ----------
+    X_data: dict
+        Dictionary holding engineered features.
+    y_data: 1d-array
+        Vector of targets (predicted variable).
+    pool: list
+        List of important features, i.e. those with
+        Pearson's correlation with target above 0.5.
+    lim_min: float, default=0.5
+        Threshold for correlations between features.
+    lim_max: float, default=0.8
+        Threshold for correlations between features 
+        and target.
+
+    Returns
+    -------
+    vifs: list
+        List of top features from the pool of important
+        features.
+    """
+    from pandas import DataFrame
+
+    # Analyze multicollinearity.
+    df = DataFrame(X_data_dict, columns=pool)
+    df['target'] = np.log10(y_data)
+    # Matrix of Pearson's correlations between features.
+    pearson_matrix = df.corr('pearson')
+    vifs = []
+    for k, c in enumerate(pearson_matrix['target']):
+        if ((c < -lim_max or c > lim_max) 
+            and pearson_matrix.columns[k] != 'target'):
+            # Add features with a very high correlation to the target.
+            vifs.append(pearson_matrix.columns[k])
+    for i in range(pearson_matrix.shape[0]):
+        for j in range(i+1, pearson_matrix.shape[1]):
+            if -lim_min < pearson_matrix.values[i,j] < lim_min:
+                if (pearson_matrix.columns[j] not in vifs 
+                    and pearson_matrix.columns[j] != 'target'):
+                    # Append features with low multicollinearity.
+                    vifs.append(pearson_matrix.columns[j])
+    
+    return vifs
+
+
 if __name__ == '__main__':
     import os
     import pickle
+    from scipy.stats import pearsonr
 
     # Input parameters:
     # ----------------
     targets = 'eol'  # ['eol', 'knee', 'knee-onset']
-    set_of_features = 'custom'  # ['variance', 'discharge', 'full', 'custom', 'all']
-    reg = 'nusvr'  # ['lin', 'gen', 'nusvr', 'svr', 'ard']
+    set_of_features = 'variance'  # ['variance', 'discharge', 'full', 'custom', 'all', 'vif']
+    reg = 'lin'  # ['lin', 'gen', 'nusvr', 'svr', 'ard']
     # Additional options:
     reduce_features = False  # Reduce nmber of features.
-    n_features = 6    # Number of features to retain.
-    verbose = False   # Print optimal hyperparameters.
-    cluster = True   # Use clustering analysis on features.
+    n_features = 9   # Number of features to retain.
+    verbose = False  # Print optimal hyperparameters.
+    cluster = False  # Use clustering analysis on features.
 
     print('Importing data ...')
     # Import data from the external file.
@@ -1105,13 +1168,29 @@ if __name__ == '__main__':
     print('\nExtracting features ...')
     # Extract features from data.
     X_data_dict, y_data_dict = get_features_targets_from_data(
-        bat_dict, skip_outliers=False
+        bat_dict,
+        skip_outliers=False
     )
     # Prepare features.
     X_data = prepare_features(X_data_dict, set_of_features, cluster=cluster)
 
     # Prepare targets.
     y_data = y_data_dict[targets]
+
+    # Very Important Features (VIF).
+    if set_of_features == 'vif':
+        pool = []
+        for col in X_data.columns:
+            p, _ = pearsonr(X_data[col].values, np.log10(y_data))
+            if p < -0.5 or p > 0.5:
+                pool.append(col)
+        if verbose:
+            print(pool)
+        # Extract VIF features from the pool.
+        vifs = vif_features(X_data_dict, y_data, pool)
+        if verbose:
+            print(vifs)
+        X_data = X_data[vifs].copy()
     
     print('\nRunning model ...')
     if reg == 'lin':
