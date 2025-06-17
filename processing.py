@@ -706,39 +706,39 @@ def get_features_targets_from_data(data_dict, end=100,
         X_data['tie-dvd'].append(tie_dvd)
 
         # Additional features from multiple individual cycles.
-        # Discharge curve features from cycles 2 to 50.
-        cell_stats_qd = get_cell_stats(data_dict, cell, 50, 'Qdlin', 
+        # Discharge curve features from cycles 2 to 100.
+        cell_stats_qd = get_cell_stats(data_dict, cell, 100, 'Qdlin', 
                                        window_size=20, THR=THRESHOLD)
-        # Min. AUC value from the first 50 cycles.
+        # Min. AUC value from the first 100 cycles.
         X_data['auc50q'].append(min(cell_stats_qd['auc']))
-        # Abs. difference between AUC values, cycles 2 and 50.
+        # Abs. difference between AUC values, cycles 2 and 100.
         X_data['auc_d'].append(abs(cell_stats_qd['auc'][-1]
                                    - cell_stats_qd['auc'][1]))
         # Intercept and slope of the line fit through the Qd
-        # evolution of AUC values from the first 50 cycles.
+        # evolution of AUC values from the first 100 cycles.
         support = np.arange(len(cell_stats_qd['auc']))
         a0, ai = interpolate_signal(support, cell_stats_qd['auc'], 0, -1)
         X_data['auc_a0'].append(a0)
         X_data['auc_ai'].append(ai[0])
         
-        # Process cycles from Qd(2) to Qd(50).
-        modes, aucs = process_multiple_deltas(data_dict, cell, 'Qdlin', 2, 50)
-        X_data['mod50'].append(modes[-1])  # Mode from Qd(50) - Qd(2)
-        X_data['auc50'].append(aucs[-1])   # AUC from Qd(50) - Qd(2)
+        # Process cycles from Qd(2) to Qd(100).
+        modes, aucs = process_multiple_deltas(data_dict, cell, 'Qdlin', 2, 100)
+        X_data['mod50'].append(modes[-1])  # Mode from Qd(100) - Qd(2)
+        X_data['auc50'].append(aucs[-1])   # AUC from Qd(100) - Qd(2)
 
-        # dQ/dV curve features from cycles 2 to 50.
-        cell_stats_dqdv = get_cell_stats(data_dict, cell, 50, 'dQdV', 
+        # dQ/dV curve features from cycles 2 to 100.
+        cell_stats_dqdv = get_cell_stats(data_dict, cell, 100, 'dQdV', 
                                          window_size=20, THR=THRESHOLD)
         # Min. AUC value from the first 50 cycles.
         X_data['auc50qv'].append(min(cell_stats_dqdv['auc']))
-        # Abs. difference between AUC values, cycles 2 and 50.
+        # Abs. difference between AUC values, cycles 2 and 100.
         X_data['auc_dqv'].append(abs(cell_stats_dqdv['auc'][-1]
                                    - cell_stats_dqdv['auc'][1]))
-        # Abs. difference between modes, cycles 2 and 50.
+        # Abs. difference between modes, cycles 2 and 100.
         X_data['md_qv'].append(abs(cell_stats_dqdv['mode'][-1] 
                                    - cell_stats_dqdv['mode'][1]))
         # Intercept and slope of the line fit through the dQdV
-        # evolution of AUC values from the first 50 cycles.
+        # evolution of AUC values from the first 100 cycles.
         support = np.arange(len(cell_stats_dqdv['auc']))
         a0, ai = interpolate_signal(support, cell_stats_dqdv['auc'], 0, -1)
         X_data['auc_a0qv'].append(a0)
@@ -746,8 +746,8 @@ def get_features_targets_from_data(data_dict, end=100,
 
         # Intercept and slope of the line fit through the
         # time interval of equal discharge voltage drop (TIE-DVD)
-        # evolution between cycles 2 and 50.
-        cell_stats_volt = get_cell_stats(data_dict, cell, 50, 'V',
+        # evolution between cycles 2 and 100.
+        cell_stats_volt = get_cell_stats(data_dict, cell, 100, 'V',
                                          window_size=20, THR=THRESHOLD)
         a0, ai = interpolate_signal(np.arange(len(cell_stats_volt['tie-dvd'])), 
                                     cell_stats_volt['tie-dvd'], 0, -1)
@@ -869,16 +869,11 @@ def prepare_features(X_data_dict, set_of_features,
         X_data = pd.DataFrame(X_data_dict, columns=selected_features)
 
     elif set_of_features == 'custom':
-        selected_features = ['min', 'std', 'kurt', 'iqr', 'tie-dvd',
+        selected_features = ['min', 'std', 'iqr', 'tie-dvd', 'tie_a0',
                              'dq_auc', 'auc50q', 'auc_d', 'auc_ai']
         X_data = pd.DataFrame(X_data_dict, columns=selected_features)
 
-    elif set_of_features == '50cycles':
-        selected_features = ['auc50q', 'auc_d', 'auc_ai', 'auc50qv', 
-                             'auc_dqv', 'auc_aiqv', 'mod50', 'auc50', 'tie_a0']
-        X_data = pd.DataFrame(X_data_dict, columns=selected_features)
-
-    elif set_of_features == 'all':
+    elif set_of_features in ['all', 'vif']:
         # Using all derived features.
         X_data = pd.DataFrame(X_data_dict)
         # Remove classification features.
@@ -1014,7 +1009,7 @@ def run_regression(reg, X, y, train_size=0.8,
     )
     # List of numerical features.
     num_features = [name for name in X.columns if name != 'cluster']
-    
+
     if reg == 'lin':
         # Penalized linear regression.
         reg_model = ElasticNet(max_iter=10_000)
@@ -1081,16 +1076,19 @@ if __name__ == '__main__':
     import os
     import pickle
 
+    from scipy.stats import pearsonr
+
+
     # Input parameters:
     # ----------------
     targets = 'eol'  # ['eol', 'knee', 'knee-onset']
-    set_of_features = 'custom'  # ['variance', 'discharge', 'full', 'custom', 'all']
+    set_of_features = 'vif'  # ['variance', 'discharge', 'full', 'custom', 'all', 'vif']
     reg = 'nusvr'  # ['lin', 'gen', 'nusvr', 'svr', 'ard']
     # Additional options:
     reduce_features = False  # Reduce nmber of features.
-    n_features = 6    # Number of features to retain.
-    verbose = False   # Print optimal hyperparameters.
-    cluster = True   # Use clustering analysis on features.
+    n_features = 6   # Number of features to retain.
+    verbose = True  # Print optimal hyperparameters.
+    cluster = False  # Use clustering analysis on features.
 
     print('Importing data ...')
     # Import data from the external file.
@@ -1112,6 +1110,17 @@ if __name__ == '__main__':
 
     # Prepare targets.
     y_data = y_data_dict[targets]
+
+    # Very Important Features (VIF)
+    if set_of_features == 'vif':
+        vif = []
+        for col in X_data.columns:
+            p, _ = pearsonr(X_data[col].values, np.log10(y_data))
+            if p < -0.5 or p > 0.5:
+                vif.append(col)
+        if verbose:
+            print(vif)
+        X_data = X_data[vif].copy()
     
     print('\nRunning model ...')
     if reg == 'lin':
