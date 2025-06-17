@@ -9,12 +9,12 @@ def import_dataset(filename):
 
     Parameters
     ----------
-    filename: str
+    filename : str
         File name holding the Matlab struct data.
     
     Returns
     -------
-    bat_dict: dict
+    bat_dict : dict
         Nested dictionary holding the data.
     """
     import h5py
@@ -66,47 +66,55 @@ def import_dataset(filename):
     return bat_dict
 
 
-def filter_signal(data, window_length=20, order=3):
+def filter_signal(data, filter='median', window_length=21):
     """
-    Remove extreme outliers and then filter the signal.
+    Remove outliers and then smooth the signal.
 
-    First, remove the extreme outliers using the median
+    First, remove outliers using the median (or mean)
     filtering technique and then further smooth the signal
-    by applying the Savitzky-Golay filter.
+    by applying the Savitzky-Golay filter (with a third-degree
+    polynomial).
 
     Parameters
     ----------
-    data: array-like
+    data : array-like
         Array (1D) holding the raw signal data points.
-    window_length: int, default=20
-        Window length in sample points for the median filter
-        and for the Savitzky-Golay filter.
-    order: int, default=3
-        Polynomial order for the Savitzky-Golay filter.
+    filter : str, default='median'
+        A type of filter to apply, either `median' (default)
+        or `mean'.
+    window_length : int, default=20
+        Window length in sample points for the median/mean
+        filter and for the Savitzky-Golay filter.
     
     Returns
     -------
-    yhat: array
+    yhat : array
         Array holding the filtered signal data points. It
         has the same dimension as the original 1D array.
     """
-    import pandas as pd
-    from scipy.signal import medfilt, savgol_filter
-
-    s = pd.Series(data, copy=True)
+    from scipy.signal import medfilt as median_filter
+    from scipy.ndimage import uniform_filter1d as mean_filter
+    from scipy.signal import savgol_filter
+    
+    # Filter's window length uses an odd number of sample points.
     if window_length % 2 == 0:
         window_length += 1
     
-    # Median filtering.
-    sf = medfilt(s, kernel_size=window_length)
+    if filter == 'median':
+        sf = median_filter(data, kernel_size=window_length)
+    elif filter == 'mean':
+        sf = mean_filter(data, size=window_length)
+    else:
+        raise NotImplementedError(f'Filter type: {filter} is not recognized.')
 
-    # Smooth data with the Savitzky-Golay filter.
-    yhat = savgol_filter(sf, window_length, order)
+    # Smooth the data with the Savitzky-Golay filter,
+    # using the third-order polynomial base.
+    yhat = savgol_filter(sf, window_length, 3, mode='nearest')
 
     return yhat
 
 
-def interpolate_signal(x, y, low, high):
+def interpolate_signal(x, y, low, high, robust=False):
     """
     Linear interpolation of the signal.
 
@@ -116,30 +124,40 @@ def interpolate_signal(x, y, low, high):
 
     Parameters
     ----------
-    x: array-like
+    x : array-like
         Array holding x-coordinate points for the signal.
-    y: array-like
+    y : array-like
         Array holding y-coordinate points for the signal.
-    low: int
+    low : int
         Index of the starting point for the approximation.
         This is the first cycle number of the discharge curve
         that will be used for the interpolation.
-    high: int
+    high : int
         Index of the ending point for the interpolation.
         This is the last cycle number of the discharge curve
         that will be used for the interpolation.
+    robust : bool, default=False
+        If True, linear interpolation of the signal is
+        carried out using the robust Huber regressor;
+        otherwise, it is a simple OLS linear regression.
     
     Returns
     -------
-    a0, ai: floats
+    a0, ai : float, list
         Intercept (a0) and slope (ai) of the linear fit 
         through the signal data (between starting and ending 
         points as defined with `low` and `high` parameters).
     """
     from sklearn import linear_model
 
-    lm = linear_model.LinearRegression()
-    lm.fit(x[low:high].reshape(-1,1), y[low:high])
+    if robust:
+        # Huber regression.
+        lm = linear_model.HuberRegressor()
+    else:
+        # OLS regression.
+        lm = linear_model.LinearRegression()
+    
+    lm.fit(x[low:high].reshape(-1,1), y[low:high])  # 1D-data
     a0 = lm.intercept_  # intercept
     ai = lm.coef_       # slope (list)
 
@@ -157,50 +175,48 @@ def get_cell_stats(data, cell_id, cycles, var, window_size=21,
 
     Parameters
     ----------
-    data: dict
+    data : dict
         Original dictionary with raw measurement data for
         all battery cells and all cycles.
-    cell_id: str
+    cell_id : str
         String holding the individual battery cell ID. It
         has a form of 'bxcy', where 'x' is the batch number
         and 'y' is the cell number.
-    cycles: int
+    cycles : int
         Number of cycles for which the data is desired, 
         starting from the first cycle in the dataset.
-    var: str
+    var : str
         Variable name for the measured value; it can be one of
         the following: 'I', 'Qc', 'Qd', 'Qdlin', 'T', 'Tdlin', 
         'V', 'dQdV', 't'.
-    window_size: int, default=21
+    window_size : int, default=21
         Window size for the median filtering of the signal. It
         mast be an odd value.
-    full: bool, default=True
+    full : bool, default=True
         Indicator that determines the extent of the statistical
         features that will be computed for the measurement data.
-    THR: float, default=10
+    THR : float, default=10
         Bound on the legal values of the measurement data.
     
     Returns
     -------
-    stats_dict: dict
+    stats_dict : dict
         Dictionary holding various statistics for the measurement 
         data for a single parameter, for the individual cell and 
         the select number of cycles (starting from the second cycle).
     """
     from scipy.stats import mode, skew, kurtosis
-    from scipy.signal import medfilt
     from sklearn.metrics import auc  # area under a curve
     from collections import defaultdict
     
     stats_dict = defaultdict(list)
     support = data[cell_id]['Vdlin']
+
     for cycle_i in range(2, cycles+1):
         # Retrieve raw data for the cycle.
         arr_raw = data[cell_id]['cycles'][str(cycle_i)][var]
-        # Apply median filtering.
-        if window_size % 2 == 0:
-            window_size += 1  # must be odd value
-        arr = medfilt(arr_raw, kernel_size=window_size)
+        # Filter the raw signal.
+        arr = filter_signal(arr_raw, window_length=window_size)
         # Test against bounds on legal values.
         if np.any(abs(arr) > THR):
             print(f'Cell ID: {cell_id} cycle {cycle_i} {var} data out of range.')
@@ -241,15 +257,15 @@ def get_data_array_stats(data_array, full=True):
 
     Parameters
     ----------
-    data_array: array-like
+    data_array : array-like
         Data array.
-    full: bool, default=True
+    full : bool, default=True
         Indicator that determines the extent of the 
         statistical features that will be computed.
     
     Returns
     -------
-    stats: dict
+    stats : dict
         Dictionary holding various statistics for the
         data array.
     """
@@ -260,6 +276,7 @@ def get_data_array_stats(data_array, full=True):
     stats_dict['max'] = data_array.max()
     stats_dict['mean'] = np.mean(data_array)
     stats_dict['std'] = np.std(data_array)
+    
     if full:
         stats_dict['mode'] = mode(data_array)[0]
         stats_dict['skew'] = skew(data_array)  # skewness
@@ -285,26 +302,26 @@ def process_multiple_deltas(data, cell_id, var,
 
     Parameters
     ----------
-    data: dict
+    data : dict
         Original dictionary with raw measurement data for
         all battery cells and all cycles.
-    cell_id: str
+    cell_id : str
         String holding the individual battery cell ID. It
         has a form of 'bxcy', where 'x' is the batch number
         and 'y' is the cell number.
-    var: str
+    var : str
         Variable name for the measured value; it can be one of
         the following: 'I', 'Qc', 'Qd', 'Qdlin', 'T', 'Tdlin', 
         'V', 'dQdV', 't'.
-    start: int
+    start : int
         Starting (i.e. referent) cycle number.
-    stop: int
+    stop : int
         Ending (i.e. last) cycle number considered.
-    step: int, default=1
+    step : int, default=1
         Step value for the cycles between `start` and `stop`.
         By default, each cycle between start and stop will
         be processed.
-    THR: float, default=50
+    THR : float, default=50
         Threshold value on the AUC. If the discharge curve
         is corrupted with measurement noise the computed AUC 
         may not have a meaningful value. This is tested for 
@@ -312,10 +329,15 @@ def process_multiple_deltas(data, cell_id, var,
 
     Returns
     -------
-    modes: array
-        Array of modes of the delta curves.
-    aucs: array
-        Array of AUC (area under the curve) values for the delta curves.
+    modes, aucs : (array, array)
+        Tuple of arrays of mode and AUC (area under the curve) 
+        values of the delta curves.
+    
+    Notes
+    -----
+    Additional features could be obtained from the "delta
+    curves" by extending this subroutine with appropriate
+    functionality.
     """
     from scipy.integrate import simpson
     from scipy.stats import mode
@@ -342,12 +364,14 @@ def process_multiple_deltas(data, cell_id, var,
         modes.append(mode(deltaQ)[0])
         k += 1
 
-    return np.asarray(modes), np.asarray(aucs)
+    return (np.asarray(modes), 
+            np.asarray(aucs),
+            )
 
 
 def bacon_watts_model(x, alpha0, alpha1, alpha2, x1, gamma=1e-8):
     # Bacon-Watts model for the knee-point identification.
-    y = alpha0 + alpha1*(x - x1) + alpha2*(x - x1)*np.tanh((x - x1)/gamma)
+    y = alpha0 + alpha1 * (x-x1) + alpha2 * (x-x1) * np.tanh((x-x1)/gamma)
 
     return y
 
@@ -355,34 +379,57 @@ def bacon_watts_model(x, alpha0, alpha1, alpha2, x1, gamma=1e-8):
 def double_bacon_watts_model(x, alpha0, alpha1, alpha2, alpha3, x0, x2, 
                              gamma=1e-8):
     # Double Bacon-Watts model for the knee-point onset prediction.
-    y = alpha0 + alpha1*(x - x0) + alpha2*(x - x0)*np.tanh((x - x0)/gamma) \
-        + alpha3*(x - x2)*np.tanh((x - x2)/gamma)
+    y = alpha0 + alpha1 * (x-x0) + alpha2 * (x-x0) * np.tanh((x-x0)/gamma) \
+        + alpha3 * (x-x2) * np.tanh((x-x2)/gamma)
 
     return y
 
 
 def fit_bacon_watts_model(x, y, p0, model_type='double'):
+    """
+    Fitting of the Bacon-Watts model(s).
+
+    Fit a single or double Bacon-Watts model to the battery
+    discharge curve data.
+
+    Parameters
+    ----------
+    x : array
+        Discharge curve's x-coordinate data points.
+    y : array
+        Discharge curve's y-coordinate data points.
+    p0 : list
+        List of initial values for the coefficients.
+    model_type : str, default='double'
+        Bacon-Watts model used for the fit: `single` or `double`.
+    
+    Returns
+    -------
+    popt, confint : list, list
+        Lists of coefficients of the Bacon-Watts fit and their
+        estimated confidence intervals.
+    """
     from scipy.optimize import curve_fit
     
     if model_type == 'single':
         # Fit a Bacon-Watts model.
         popt, pcov = curve_fit(bacon_watts_model, x, y, p0=p0)
         # Confidence intervals on the predicted knee-point value.
-        confint = [popt[3] - 1.96 * np.diag(pcov)[3], 
-                   popt[3] + 1.96 * np.diag(pcov)[3]]
+        confint = [popt[3] - 1.96*np.diag(pcov)[3], 
+                   popt[3] + 1.96*np.diag(pcov)[3]]
     elif model_type == 'double':
         # Fit a double Bacon-Watts model.
         popt, pcov = curve_fit(double_bacon_watts_model, x, y, p0=p0)
         # Confidence intervals on the predicted knee-point onset value.
-        confint = [popt[4] - 1.96 * np.diag(pcov)[4], 
-                   popt[4] + 1.96 * np.diag(pcov)[4]]
+        confint = [popt[4] - 1.96*np.diag(pcov)[4], 
+                   popt[4] + 1.96*np.diag(pcov)[4]]
     else:
         raise NotImplementedError(f'Model {model_type} is not recognized.')
     
     return popt, confint
 
 
-def get_features_targets_from_data(data_dict, end=100, 
+def get_features_targets_from_data(data_dict, end=100,
                                    skip_outliers=True):
     """
     Extract features and targets from battery cell data.
@@ -395,23 +442,23 @@ def get_features_targets_from_data(data_dict, end=100,
 
     Parameters
     ----------
-    data_dict: dict
+    data_dict : dict
         Dictionary holding battery cell measurements data.
         This dictionary is formed by importing data.
-    end: int, default=100
+    end : int, default=100
         Cycle index which marks the end of the observation
         period. All features must be derived from the data
         up to (and including) this cycle number.
-    skip_outlier: bool, default=True
+    skip_outlier : bool, default=True
         Indicator for skipping outlier battery cells (i.e. 
         those that have 'nan' values for `cycle_life` data
         dictionary keys).
 
     Returns
     -------
-    X_data: dict
+    X_data : dict
         Dictionary holding features for each battery cell.
-    y_data: dict
+    y_data : dict
         Dictionary holding targets for each battery cell, 
         with following four keys:
             'eol': End-of-Life values,
@@ -487,7 +534,7 @@ def get_features_targets_from_data(data_dict, end=100,
         cycles = data_dict[cell]['summary']['cycle']
         fade_curve = data_dict[cell]['summary']['QD']
         # Smooth the fade discharge curve.
-        fade_curve_smooth = filter_signal(fade_curve, order=2)
+        fade_curve_smooth = filter_signal(fade_curve)
         # End-of-Life cell cycle.
         cycle_life = data_dict[cell]['cycle_life'][0][0]
 
@@ -553,12 +600,15 @@ def get_features_targets_from_data(data_dict, end=100,
         y_data_knee.append(knee_point)
         
         # Targets are knee-onset points.
-        # Initial values for the fit.
+        # Initial values for the double model fit; these are obtained
+        # from the single model's fit results.
         p0 = [popt[0], popt[1] + popt[2]/2, popt[2], popt[2]/2, 
-                0.8*popt[3], 1.1*popt[3]]
+              0.8*popt[3], 1.1*popt[3]]
         # Fit a double Bacon-Watts model.
         popt_onset, _ = fit_bacon_watts_model(cycles, fade_curve_smooth, p0, 
                                                 model_type='double')
+        # Some discharge curves could be ill-defined or not exhibit
+        # proper knee or knee-onset points.
         knee_onset_point = min(int(popt_onset[4]), int(popt_onset[5]))
         
         # Check the validity of the estimated knee-onset point.
@@ -567,7 +617,8 @@ def get_features_targets_from_data(data_dict, end=100,
         if knee_onset_point < 0:
             raise ValueError(f'Error: {cell} knee-onset point is negative!')
         if knee_onset_point > min(eol, knee_point):
-            print(f'Cell ID: {cell}, Knee: {knee_point}, Knee-onset: {knee_onset_point}, EoL: {eol}')
+            print(f'Cell ID: {cell}, Knee: {knee_point}, \
+                  Knee-onset: {knee_onset_point}, EoL: {eol}')
                 
         # Append knee-onset point value.
         y_data_knee_onset.append(knee_onset_point)
@@ -579,10 +630,8 @@ def get_features_targets_from_data(data_dict, end=100,
             raise ValueError(f'Cell ID: {cell} Qd4 cycle values out of range.')
         if np.any(abs(Qd5) > THRESHOLD):
             raise ValueError(f'Cell ID: {cell} Qd5 cycle values out of range.')
-        
         # Qd(5) - Qd(4) cycles.
         deltaq = Qd5 - Qd4
-        
         # Statistical features from dQ(5-4) curve.
         dq_stats = get_data_array_stats(deltaq)
         for key, value in dq_stats.items():
@@ -598,11 +647,9 @@ def get_features_targets_from_data(data_dict, end=100,
         if np.any(abs(Qd10) > THRESHOLD):
             raise ValueError(f'Cell ID: {cell} Qd(10) cycle values out of range.')
         if np.any(abs(Qd100) > THRESHOLD):
-            raise ValueError(f'Cell ID: {cell} Qd(100) cycle values out of range.')
-        
+            raise ValueError(f'Cell ID: {cell} Qd({end}) cycle values out of range.')
         # Qd(100) - Qd(10) cycles.
-        deltaQ = Qd100 - Qd10
-        
+        deltaQ = Qd100 - Qd10     
         # Statistical features from dQ(100-10) curve.
         dQstats = get_data_array_stats(deltaQ)
         for key, value in dQstats.items():
@@ -614,7 +661,8 @@ def get_features_targets_from_data(data_dict, end=100,
         # Discharge capacity at cycle 2.
         Qd2 = fade_curve_smooth[1]
         if Qd2 > 1.15:
-            raise ValueError(f'Cell ID: {cell} Discharge capacity at cycle 2 is out of bounds.')
+            raise ValueError(f'Cell ID: {cell} Discharge capacity at cycle 2 \
+                             is out of bounds.')
         X_data['qd2'].append(Qd2)
         # Difference between max discharge capacity and cycle 2.
         X_data['qd_dif'].append(fade_curve_smooth.max() - Qd2)
@@ -627,9 +675,10 @@ def get_features_targets_from_data(data_dict, end=100,
         X_data['inter'].append(intercept)
         
         # Linear fit to the discharge fade curve between cycles 90 and 100.
-        interc, slope = interpolate_signal(cycles, fade_curve_smooth, end-10, end)
+        intercept, slope = interpolate_signal(cycles, fade_curve_smooth, 
+                                              end-10, end)
         X_data['slp9'].append(slope[0])
-        X_data['inc9'].append(interc)
+        X_data['inc9'].append(intercept)
         
         # Other features.
         # Average charge time for the first five cycles.
@@ -662,10 +711,8 @@ def get_features_targets_from_data(data_dict, end=100,
         # dQdV cycles curves.
         dQdV10 = data_dict[cell]['cycles'][str(10)]['dQdV']
         dQdV100 = data_dict[cell]['cycles'][str(end)]['dQdV']
-        
         # dQdV(100) - dQdV(10) cycles
         delta_dQdV = dQdV100 - dQdV10       
-        
         # Statistical features from dQdV(100-10) curve.
         dQdVstats = get_data_array_stats(delta_dQdV)
         for key, value in dQdVstats.items():
@@ -681,7 +728,6 @@ def get_features_targets_from_data(data_dict, end=100,
         Td100 = data_dict[cell]['cycles'][str(end)]['Tdlin']
         # Td(100) - Td(10)
         delta_Td = Td100 - Td10
-        
         # Statistical features from Td(100-10) curve.
         td_stats = get_data_array_stats(delta_Td)
         for key, value in td_stats.items():
@@ -706,39 +752,39 @@ def get_features_targets_from_data(data_dict, end=100,
         X_data['tie-dvd'].append(tie_dvd)
 
         # Additional features from multiple individual cycles.
-        # Discharge curve features from cycles 2 to 50.
-        cell_stats_qd = get_cell_stats(data_dict, cell, 50, 'Qdlin', 
+        # Discharge curve features from cycles 2 to 100.
+        cell_stats_qd = get_cell_stats(data_dict, cell, end, 'Qdlin', 
                                        window_size=20, THR=THRESHOLD)
-        # Min. AUC value from the first 50 cycles.
+        # Min. AUC value from the first 100 cycles.
         X_data['auc50q'].append(min(cell_stats_qd['auc']))
-        # Abs. difference between AUC values, cycles 2 and 50.
+        # Abs. difference between AUC values, cycles 2 and 100.
         X_data['auc_d'].append(abs(cell_stats_qd['auc'][-1]
                                    - cell_stats_qd['auc'][1]))
         # Intercept and slope of the line fit through the Qd
-        # evolution of AUC values from the first 50 cycles.
+        # evolution of AUC values from the first 100 cycles.
         support = np.arange(len(cell_stats_qd['auc']))
         a0, ai = interpolate_signal(support, cell_stats_qd['auc'], 0, -1)
         X_data['auc_a0'].append(a0)
         X_data['auc_ai'].append(ai[0])
         
-        # Process cycles from Qd(2) to Qd(50).
-        modes, aucs = process_multiple_deltas(data_dict, cell, 'Qdlin', 2, 50)
-        X_data['mod50'].append(modes[-1])  # Mode from Qd(50) - Qd(2)
-        X_data['auc50'].append(aucs[-1])   # AUC from Qd(50) - Qd(2)
+        # Process cycles from Qd(2) to Qd(100).
+        modes, aucs = process_multiple_deltas(data_dict, cell, 'Qdlin', 2, end)
+        X_data['mod50'].append(modes[-1])  # Mode from Qd(100) - Qd(2)
+        X_data['auc50'].append(aucs[-1])   # AUC from Qd(100) - Qd(2)
 
-        # dQ/dV curve features from cycles 2 to 50.
-        cell_stats_dqdv = get_cell_stats(data_dict, cell, 50, 'dQdV', 
+        # dQ/dV curve features from cycles 2 to 100.
+        cell_stats_dqdv = get_cell_stats(data_dict, cell, end, 'dQdV', 
                                          window_size=20, THR=THRESHOLD)
-        # Min. AUC value from the first 50 cycles.
+        # Min. AUC value from the first 100 cycles.
         X_data['auc50qv'].append(min(cell_stats_dqdv['auc']))
-        # Abs. difference between AUC values, cycles 2 and 50.
+        # Abs. difference between AUC values, cycles 2 and 100.
         X_data['auc_dqv'].append(abs(cell_stats_dqdv['auc'][-1]
                                    - cell_stats_dqdv['auc'][1]))
-        # Abs. difference between modes, cycles 2 and 50.
+        # Abs. difference between modes, cycles 2 and 100.
         X_data['md_qv'].append(abs(cell_stats_dqdv['mode'][-1] 
                                    - cell_stats_dqdv['mode'][1]))
         # Intercept and slope of the line fit through the dQdV
-        # evolution of AUC values from the first 50 cycles.
+        # evolution of AUC values from the first 100 cycles.
         support = np.arange(len(cell_stats_dqdv['auc']))
         a0, ai = interpolate_signal(support, cell_stats_dqdv['auc'], 0, -1)
         X_data['auc_a0qv'].append(a0)
@@ -746,8 +792,8 @@ def get_features_targets_from_data(data_dict, end=100,
 
         # Intercept and slope of the line fit through the
         # time interval of equal discharge voltage drop (TIE-DVD)
-        # evolution between cycles 2 and 50.
-        cell_stats_volt = get_cell_stats(data_dict, cell, 50, 'V',
+        # evolution between cycles 2 and 100.
+        cell_stats_volt = get_cell_stats(data_dict, cell, end, 'V',
                                          window_size=20, THR=THRESHOLD)
         a0, ai = interpolate_signal(np.arange(len(cell_stats_volt['tie-dvd'])), 
                                     cell_stats_volt['tie-dvd'], 0, -1)
@@ -774,32 +820,33 @@ def cluster_membership(X_data, metric='euclidean',
     """
     Cluster analysis on top of the features.
 
-    Agglomerative lustering is appled to features in order
+    Agglomerative clustering is appled to features in order
     to separate battery cells into two independent clusters.
     Hopefully, clustering will identify battery cell samples 
-    with short and long life and differentiate between them.
+    with short and long life and differentiate between them,
+    which may help inform regression analysis.
 
     Parameters
     ----------
-    X_data: DataFrame
+    X_data : DataFrame
         Pandas DataFrame holding selected features for 
         each battery cell.
-    metric: str, default='euclidean'
+    metric : str, default='euclidean'
         Metric used to compute the linkage. Can be 
         'euclidean', 'l1', 'l2', 'manhattan', 'cosine'.
-    graph_structure: bool, default=False
+    graph_structure : bool, default=False
         Generate connectivity matrix from the k-neighbors
         graph analysis.
-    n_neighbors: int, default=5
+    n_neighbors : int, default=5
         Number of neighbors for each sample, for the
         k-neighbors graph analysis.
-    linkage: str, default='ward'
+    linkage : str, default='ward'
         Linkage criterion to use. Can be 'ward', 
         'complete', 'average', 'single'.
         
     Returns
     -------
-    cluster_labels: list
+    cluster_labels : list
         List of cluster membership labels for each 
         battery cell sample.
     """
@@ -834,22 +881,22 @@ def prepare_features(X_data_dict, set_of_features,
 
     Parameters
     ----------
-    X_data: dict
+    X_data : dict
         Dictionary holding all engineered features.
-    set_of_features: str
+    set_of_features : str
         Designation for the set of features that will
         be used for the model. Following values are
         allowed for this parameter: 'variance',
-        'discharge', 'full', 'custom', 'all'.
-    cluster: bool, default=False
+        'discharge', 'full', 'custom', 'all', 'vif'.
+    cluster : bool, default=False
         Apply clustering analysis on top of the features.
-    kwargs: dict
+    kwargs : dict
         Additional parameters passed down to the clustering
         function.
         
     Returns
     -------
-    X_data: pd.DataFrame
+    X_data : pd.DataFrame
         Pandas dataframe holding selected features.
     """
     import pandas as pd
@@ -858,32 +905,25 @@ def prepare_features(X_data_dict, set_of_features,
         # Using a single feature.
         X_data = pd.DataFrame(X_data_dict, columns=['std'])
         X_data['std'] = np.log10(X_data['std'].values**2)
-
     elif set_of_features == 'discharge':
+        # Selected set of features from Severson et al.
         selected_features = ['std', 'min', 'skew', 'kurt', 'qd2', 'qd_dif']
         X_data = pd.DataFrame(X_data_dict, columns=selected_features)
-
     elif set_of_features ==  'full':
+        # Full set of features from Severson et al.
         selected_features = ['std', 'min', 'qd2', 'slope', 'inter', 
                              'char5', 't_int', 'rsmin', 'rsdif']
         X_data = pd.DataFrame(X_data_dict, columns=selected_features)
-
     elif set_of_features == 'custom':
-        selected_features = ['min', 'std', 'kurt', 'iqr', 'tie-dvd',
-                             'dq_auc', 'auc50q', 'auc_d', 'auc_ai']
+        # Custom-made set of features.
+        selected_features = ['mode', 'std', 'kurt', 'iqr', 'dqdv_iqr',
+                             'dq_auc', 'auc50q', 'auc_ai', 'tie_a0']
         X_data = pd.DataFrame(X_data_dict, columns=selected_features)
-
-    elif set_of_features == '50cycles':
-        selected_features = ['auc50q', 'auc_d', 'auc_ai', 'auc50qv', 
-                             'auc_dqv', 'auc_aiqv', 'mod50', 'auc50', 'tie_a0']
-        X_data = pd.DataFrame(X_data_dict, columns=selected_features)
-
-    elif set_of_features == 'all':
+    elif set_of_features in ['all', 'vif']:
         # Using all derived features.
         X_data = pd.DataFrame(X_data_dict)
         # Remove classification features.
         X_data.drop(columns=['class_min', 'class_std'], inplace=True)
-
     else:
         raise NotImplementedError(f'Model: {set_of_features} is not recognized!')
     
@@ -895,30 +935,31 @@ def prepare_features(X_data_dict, set_of_features,
     return X_data
 
 
-def get_grid_values(reg):
+def get_grid_values(reg, n_values):
     """
     Create a fixed grid of hyperparameter values.
 
     Parameters
     ----------
-    reg: str
-        Short code for the model type. Following 
-        values are allowed: 
+    reg : str
+        Short code for the model type, as follows:
         'lin': Penalized linear regression,
         'gen': Generalized linear regression with 
                a Tweedie distribution,
         'nusvr': Nu-Support Vector Machine regression,
         'svr': Support Vector Machine regression,
         'ard': Relevance Vector Machine regression.
+    n_values : int
+        Number of grid points for the `alpha`, `lambda` 
+        and `C` hyperparameters.
 
     Returns
     -------
-    grid: dict
+    grid : dict
         Dictionary with model parameters names as keys 
         and lists of parameter settings to try as values.
     """
     # Grid of hyperparameters values.
-    n_values = 10
     if reg == 'lin':
         # ElasticNet
         grid = {'alpha': np.logspace(-3, 3, n_values),
@@ -950,7 +991,7 @@ def get_grid_values(reg):
 
 def run_regression(reg, X, y, train_size=0.8, 
                    reduce_features=False, n_features=6,
-                   verbose=False):
+                   n_values=10, verbose=False):
     """
     Run a regression model.
 
@@ -963,7 +1004,7 @@ def run_regression(reg, X, y, train_size=0.8,
 
     Parameters
     ----------
-    reg: str
+    reg : str
         Short code for the model type. Following 
         values are allowed: 
         'lin': Penalized linear regression,
@@ -972,26 +1013,28 @@ def run_regression(reg, X, y, train_size=0.8,
         'nusvr': Nu-Support Vector Machine regression,
         'svr': Support Vector Machine regression,
         'ard': Relevance Vector Machine regression.
-    X: 2d-array
+    X : 2d-array
         Matrix of features (predictors).
-    y: 1d-array
+    y : 1d-array
         Vector of targets (predicted variable).
-    train_size: float, default=0.8
+    train_size : float, default=0.8
         Size of the train set (0, 1).
-    reduce_features: bool, default=False
+    reduce_features : bool, default=False
         Indicator for activating fetaures reduction
         option of the data processing pipeline.
-    n_features, int, default=6
+    n_features : int, default=6
         Number of features to retain after the features
         reduction process.
-    verbose: bool, default=False
+    n_values : int, default=10
+        Number of grid points for hyperparameters optimization.
+    verbose : bool, default=False
         Print diagnostic information.
     
     Returns
     -------
-    rmse: float
+    rmse : float
         Root mean squared error on the test set.
-    mape: float
+    mape : float
         Mean absolute percentage error on the test set.
     """
     from sklearn import svm
@@ -1006,7 +1049,8 @@ def run_regression(reg, X, y, train_size=0.8,
     from sklearn.model_selection import GridSearchCV
 
     if reduce_features and n_features > len(X.columns):
-            raise ValueError(f'Cannot reduce features with: {n_features} > {len(X.columns)}!')
+            raise ValueError(f'Cannot reduce features with: \
+                             {n_features} > {len(X.columns)}!')
     
     # Split dataset into train and test sets.
     X_train, X_test, y_train, y_test = train_test_split(
@@ -1014,7 +1058,7 @@ def run_regression(reg, X, y, train_size=0.8,
     )
     # List of numerical features.
     num_features = [name for name in X.columns if name != 'cluster']
-    
+
     if reg == 'lin':
         # Penalized linear regression.
         reg_model = ElasticNet(max_iter=10_000)
@@ -1034,7 +1078,7 @@ def run_regression(reg, X, y, train_size=0.8,
         raise NotImplementedError(f'Chosen model {reg} is not implemented.')
 
     # Get a fixed grid of hyperparameter values.
-    grid = get_grid_values(reg)
+    grid = get_grid_values(reg, n_values)
 
     # Hyperparameters optimization with grid search and cross-validation.
     grid_search = GridSearchCV(estimator=reg_model, param_grid=grid, 
@@ -1042,6 +1086,9 @@ def run_regression(reg, X, y, train_size=0.8,
                                cv=3, refit=True, n_jobs=-1)
     # Pipeline.
     if reduce_features:
+        if n_features > len(X.columns):
+            raise ValueError(f'Cannot reduce features: \
+                             {n_features} > {len(X.columns)}')
         model = Pipeline([
             # Transform only numerical features.
             ('transform', ColumnTransformer(
@@ -1077,21 +1124,72 @@ def run_regression(reg, X, y, train_size=0.8,
     return rmse, mape*100.
 
 
+def vif_features(X_data_dict, y_data, pool, lmin, lmax):
+    """ Top features from the VIF pool.
+
+    Parameters
+    ----------
+    X_data : dict
+        Dictionary holding engineered features.
+    y_data : 1d-array
+        Vector of targets (predicted variable).
+    pool : list
+        List of important features, i.e. those with
+        Pearson's correlation with target above 0.5.
+    lmin : float
+        Threshold for correlations between features.
+    lmax : float
+        Threshold for correlations between features 
+        and target.
+
+    Returns
+    -------
+    vifs : list
+        List of top features from the pool of important
+        features.
+    """
+    from pandas import DataFrame
+
+    # Analyze multicollinearity.
+    df = DataFrame(X_data_dict, columns=pool)
+    df['target'] = np.log10(y_data)
+    # Matrix of Pearson's correlations between features.
+    pearson_matrix = df.corr('pearson')
+    
+    vifs = []
+    for k, c in enumerate(pearson_matrix['target']):
+        if ((c < -lmax or c > lmax) 
+            and pearson_matrix.columns[k] != 'target'):
+            # Add features with a very high correlation to the target.
+            vifs.append(pearson_matrix.columns[k])
+    
+    for i in range(pearson_matrix.shape[0]):
+        for j in range(i+1, pearson_matrix.shape[1]):
+            if -lmin < pearson_matrix.values[i,j] < lmin:
+                if (pearson_matrix.columns[j] not in vifs 
+                    and pearson_matrix.columns[j] != 'target'):
+                    # Append features with low multicollinearity.
+                    vifs.append(pearson_matrix.columns[j])
+    
+    return vifs
+
+
 if __name__ == '__main__':
     import os
     import pickle
+    from scipy.stats import pearsonr
 
     # Input parameters:
     # ----------------
     targets = 'eol'  # ['eol', 'knee', 'knee-onset']
-    set_of_features = 'custom'  # ['variance', 'discharge', 'full', 'custom', 'all']
-    reg = 'nusvr'  # ['lin', 'gen', 'nusvr', 'svr', 'ard']
+    set_of_features = 'variance'  # ['variance', 'discharge', 'full', 'custom', 'all', 'vif']
+    reg = 'lin'  # ['lin', 'gen', 'nusvr', 'svr', 'ard']
     # Additional options:
     reduce_features = False  # Reduce nmber of features.
-    n_features = 6    # Number of features to retain.
-    verbose = False   # Print optimal hyperparameters.
-    cluster = True   # Use clustering analysis on features.
-
+    n_features = 9   # Number of features to retain.
+    verbose = False  # Print optimal hyperparameters.
+    cluster = False  # Use clustering analysis on features.
+    
     print('Importing data ...')
     # Import data from the external file.
     path = os.path.dirname('/home/ps/Documents/Batteries/Data/')  # EDIT HERE
@@ -1105,13 +1203,30 @@ if __name__ == '__main__':
     print('\nExtracting features ...')
     # Extract features from data.
     X_data_dict, y_data_dict = get_features_targets_from_data(
-        bat_dict, skip_outliers=False
+        bat_dict,
+        skip_outliers=False
     )
     # Prepare features.
     X_data = prepare_features(X_data_dict, set_of_features, cluster=cluster)
 
     # Prepare targets.
     y_data = y_data_dict[targets]
+
+    # Very Important Features (VIF).
+    if set_of_features == 'vif':
+        pool = []
+        lmin, lmax = 0.5, 0.8
+        for col in X_data.columns:
+            p, _ = pearsonr(X_data[col].values, np.log10(y_data))
+            if p < -lmin or p > lmin:
+                pool.append(col)
+        if verbose:
+            print(pool)
+        # Extract VIF features from the pool.
+        vifs = vif_features(X_data_dict, y_data, pool, lmin, lmax)
+        if verbose:
+            print(vifs)
+        X_data = X_data[vifs].copy()
     
     print('\nRunning model ...')
     if reg == 'lin':
