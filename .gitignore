@@ -5,6 +5,9 @@ Data/
 *.asv
 *.mat
 
+#ignore figures
+*.png
+
 #ignore jupyter notebook files
 .ipynb_checkpoints/
 __pycache__/
